@@ -5,6 +5,10 @@ app = Flask(__name__)
 
 MOVES_FILE = "moves.json"
 
+@app.route('/')
+def index():
+    return "Gunting-Batu-Kertas Backend is Running!"
+
 def load_moves():
     try:
         with open(MOVES_FILE, "r") as f:
