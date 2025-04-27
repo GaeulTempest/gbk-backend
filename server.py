@@ -7,7 +7,7 @@ app = Flask(__name__)
 MOVES_FILE = "moves.json"
 
 # Waktu dalam detik untuk timeout
-TIMEOUT = 30  
+TIMEOUT = 20  
 
 def load_moves():
     try:
