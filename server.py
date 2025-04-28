@@ -7,9 +7,10 @@ app = Flask(__name__)
 
 MOVES_FILE = "moves.json"
 STATS_FILE = "stats.json"
-TIMEOUT = 60  # 60 detik timeout game
+TIMEOUT = 60  # Timeout 60 detik
 
-# Load data moves
+# Fungsi Load dan Save
+
 def load_moves():
     if not os.path.exists(MOVES_FILE):
         return {}
@@ -19,56 +20,77 @@ def load_moves():
     except json.JSONDecodeError:
         return {}
 
-# Save data moves
 def save_moves(data):
     with open(MOVES_FILE, "w") as f:
         json.dump(data, f)
 
-# Load statistik
 def load_stats():
     if not os.path.exists(STATS_FILE):
-        return {"Player A": {"win": 0, "lose": 0, "draw": 0},
-                "Player B": {"win": 0, "lose": 0, "draw": 0}}
+        return {
+            "Player A": {"win": 0, "lose": 0, "draw": 0},
+            "Player B": {"win": 0, "lose": 0, "draw": 0}
+        }
     try:
         with open(STATS_FILE, "r") as f:
             return json.load(f)
     except json.JSONDecodeError:
-        return {"Player A": {"win": 0, "lose": 0, "draw": 0}}
+        return {
+            "Player A": {"win": 0, "lose": 0, "draw": 0},
+            "Player B": {"win": 0, "lose": 0, "draw": 0}
+        }
 
-# Save statistik
 def save_stats(data):
     with open(STATS_FILE, "w") as f:
         json.dump(data, f)
 
-# --- API ROUTES ---
+# --- API Routes ---
+
+@app.route('/')
+def index():
+    return jsonify({"message": "Server is running!"})
+
+@app.route('/standby', methods=['POST'])
+def standby():
+    data = request.get_json()
+
+    if not data or "player" not in data:
+        return jsonify({"error": "Invalid request format. Expected 'player'."}), 400
+
+    if data["player"] not in ["A", "B"]:
+        return jsonify({"error": "Invalid player. Must be 'A' or 'B'."}), 400
+
+    moves = load_moves()
+    moves[f"{data['player']}_ready"] = True
+    save_moves(moves)
+
+    return jsonify({"status": f"Player {data['player']} is ready."})
 
 @app.route('/get_moves', methods=['GET'])
 def get_moves():
     moves = load_moves()
     return jsonify(moves)
 
-
-@app.route('/')
-def index():
-    return jsonify({"message": "Server is running!"})
-
 @app.route('/submit', methods=['POST'])
 def submit():
     data = request.get_json()
 
     if not data or "player" not in data or "move" not in data:
-        return jsonify({"error": "Invalid request."}), 400
+        return jsonify({"error": "Invalid request format. Expected 'player' and 'move'."}), 400
+
+    if data["player"] not in ["A", "B"]:
+        return jsonify({"error": "Invalid player. Must be 'A' or 'B'."}), 400
+
+    if data["move"] not in ["Batu", "Gunting", "Kertas"]:
+        return jsonify({"error": "Invalid move. Must be 'Batu', 'Gunting', or 'Kertas'."}), 400
 
     moves = load_moves()
     if "timestamp" not in moves:
         moves["timestamp"] = time.time()
 
     moves[data["player"]] = data["move"]
-    moves[f"{data['player']}_ready"] = True
     save_moves(moves)
 
-    print(f"[SUBMIT] {data['player']} -> {data['move']}")
-    return jsonify({"status": "Move received."})
+    return jsonify({"status": "Move received successfully."})
 
 @app.route('/result', methods=['GET'])
 def result():
@@ -98,7 +120,7 @@ def result():
         else:
             winner = "Player B Menang"
 
-        # Update statistik
+        # Update Statistik
         stats = load_stats()
         if winner == "Seri":
             stats["Player A"]["draw"] += 1
@@ -115,7 +137,6 @@ def result():
         moves["result_ready"] = True
         save_moves(moves)
 
-        print(f"[RESULT] {winner}")
         return jsonify({
             "A": a,
             "B": b,
@@ -124,6 +145,23 @@ def result():
 
     return jsonify({"status": "Waiting for opponent's move..."})
 
-@app.route('/standby', methods=['POST'])
-def standby():
-    data = request.get_json()
+@app.route('/stats', methods=['GET'])
+def stats():
+    stats = load_stats()
+    return jsonify(stats)
+
+@app.route('/reset', methods=['POST'])
+def reset():
+    save_moves({})
+    return jsonify({"status": "Game reset successfully."})
+
+# Start Server
+if __name__ == '__main__':
+    if not os.path.exists(MOVES_FILE):
+        save_moves({})
+    if not os.path.exists(STATS_FILE):
+        save_stats({
+            "Player A": {"win": 0, "lose": 0, "draw": 0},
+            "Player B": {"win": 0, "lose": 0, "draw": 0}
+        })
+    app.run(host='0.0.0.0', port=8080)
