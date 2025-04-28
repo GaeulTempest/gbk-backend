@@ -6,8 +6,9 @@ import os
 app = Flask(__name__)
 
 MOVES_FILE = "moves.json"
-TIMEOUT = 30  # Timeout dalam detik
+TIMEOUT = 60  # 60 detik timeout otomatis
 
+# Fungsi load moves dari file
 def load_moves():
     if not os.path.exists(MOVES_FILE):
         return {}
@@ -17,42 +18,17 @@ def load_moves():
     except json.JSONDecodeError:
         return {}
 
+# Fungsi save moves ke file
 def save_moves(data):
     with open(MOVES_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump(data, f)
 
+# Route utama (cek server hidup)
 @app.route('/')
 def index():
     return jsonify({"message": "Gunting Batu Kertas Backend is Running!"})
 
-@app.route('/get_moves', methods=['GET'])
-def get_moves():
-    moves = load_moves()
-    return jsonify(moves)
-
-
-@app.route('/standby', methods=['POST'])
-def standby():
-    data = request.get_json()
-
-    if not data or "player" not in data:
-        return jsonify({"error": "Invalid request. 'player' is required."}), 400
-
-    if data["player"] not in ["A", "B"]:
-        return jsonify({"error": "Invalid player. Must be 'A' or 'B'."}), 400
-
-    moves = load_moves()
-
-    # Tandai player sudah standby
-    moves[f"{data['player']}_ready"] = True
-
-    # Set timestamp baru kalau belum ada
-    if not moves.get("timestamp"):
-        moves["timestamp"] = time.time()
-
-    save_moves(moves)
-    return jsonify({"status": f"Player {data['player']} is ready."})
-
+# Route submit gesture
 @app.route('/submit', methods=['POST'])
 def submit():
     data = request.get_json()
@@ -68,34 +44,34 @@ def submit():
 
     moves = load_moves()
 
-    # Harus standby dulu sebelum submit move
-    if not moves.get(f"{data['player']}_ready"):
-        return jsonify({"error": "Player belum standby. Tidak boleh submit move."}), 400
+    # Tambahkan timestamp kalau pertama kali main
+    if "timestamp" not in moves:
+        moves["timestamp"] = time.time()
 
+    # Simpan gerakan pemain
     moves[data["player"]] = data["move"]
     save_moves(moves)
 
     return jsonify({"status": "Move received successfully."})
 
+# Route untuk lihat hasil
 @app.route('/result', methods=['GET'])
 def result():
     moves = load_moves()
 
-    # Timeout cek
+    # Cek timeout
     if "timestamp" in moves:
         elapsed = time.time() - moves["timestamp"]
         if elapsed > TIMEOUT:
             save_moves({})
-            return jsonify({"status": "Timeout! Game reset automatically after 30 seconds."})
+            return jsonify({"status": "Timeout! Game reset automatically after 60 seconds."})
 
-    # Cek 2 player sudah standby
-    if not (moves.get("A_ready") and moves.get("B_ready")):
-        return jsonify({"status": "Menunggu pemain lain untuk standby..."})
-
-    # Cek kedua pemain sudah submit move
+    # Kalau sudah ada dua pemain submit
     if "A" in moves and "B" in moves:
-        a, b = moves["A"], moves["B"]
+        a = moves["A"]
+        b = moves["B"]
 
+        # Menentukan pemenang
         if a == b:
             winner = "Seri"
         elif (a == "Batu" and b == "Gunting") or (a == "Gunting" and b == "Kertas") or (a == "Kertas" and b == "Batu"):
@@ -103,15 +79,43 @@ def result():
         else:
             winner = "Player B Menang"
 
-        save_moves({})
+        save_moves({})  # Reset file moves setelah hasil keluar
         return jsonify({"A": a, "B": b, "result": winner})
 
-    return jsonify({"status": "Menunggu pemain lain untuk mengirim gerakan..."})
+    # Kalau belum lengkap, kasih status tunggu
+    return jsonify({"status": "Waiting for opponent's move..."})
 
+# Route untuk standby (daftar ready)
+@app.route('/standby', methods=['POST'])
+def standby():
+    data = request.get_json()
+
+    if not data or "player" not in data:
+        return jsonify({"error": "Invalid request format. Expected 'player'."}), 400
+
+    if data["player"] not in ["A", "B"]:
+        return jsonify({"error": "Invalid player. Must be 'A' or 'B'."}), 400
+
+    moves = load_moves()
+
+    # Tambahkan info siap main
+    moves[f"{data['player']}_ready"] = True
+    save_moves(moves)
+
+    return jsonify({"status": f"Player {data['player']} is ready."})
+
+# Route untuk lihat siapa yang standby
+@app.route('/get_moves', methods=['GET'])
+def get_moves():
+    moves = load_moves()
+    return jsonify(moves)
+
+# Route manual reset game
 @app.route('/reset', methods=['POST'])
 def reset():
     save_moves({})
-    return jsonify({"status": "Game manually reset."})
+    return jsonify({"status": "Game reset successfully."})
 
+# Jalankan server
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
