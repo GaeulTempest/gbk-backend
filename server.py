@@ -42,6 +42,12 @@ def save_stats(data):
 
 # --- API ROUTES ---
 
+@app.route('/get_moves', methods=['GET'])
+def get_moves():
+    moves = load_moves()
+    return jsonify(moves)
+
+
 @app.route('/')
 def index():
     return jsonify({"message": "Server is running!"})
