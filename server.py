@@ -7,16 +7,16 @@ app = Flask(__name__)
 
 MOVES_FILE = "moves.json"
 STATS_FILE = "stats.json"
-TIMEOUT = 60  # dalam detik
+TIMEOUT = 60  # Timeout 60 detik
 
-# --- Functions ---
+# --- Load and Save Helpers ---
 def load_moves():
     if not os.path.exists(MOVES_FILE):
         return {}
     try:
         with open(MOVES_FILE, "r") as f:
             return json.load(f)
-    except json.JSONDecodeError:
+    except:
         return {}
 
 def save_moves(data):
@@ -32,18 +32,14 @@ def load_stats():
     try:
         with open(STATS_FILE, "r") as f:
             return json.load(f)
-    except json.JSONDecodeError:
-        return {
-            "Player A": {"win": 0, "lose": 0, "draw": 0},
-            "Player B": {"win": 0, "lose": 0, "draw": 0}
-        }
+    except:
+        return {}
 
 def save_stats(data):
     with open(STATS_FILE, "w") as f:
         json.dump(data, f)
 
 # --- Routes ---
-
 @app.route('/')
 def index():
     return jsonify({"message": "Server is running!"})
@@ -106,7 +102,7 @@ def result():
         else:
             winner = "Player B Menang"
 
-        # Update statistics
+        # Update stats
         stats = load_stats()
         if winner == "Seri":
             stats["Player A"]["draw"] += 1
@@ -141,10 +137,9 @@ def stats():
 
 @app.route('/reset', methods=['POST'])
 def reset():
-    save_moves({})  # Reset semua: gerakan + standby + timestamp
+    save_moves({})
     return jsonify({"status": "Game reset successfully."})
 
-# --- Run server ---
 if __name__ == '__main__':
     if not os.path.exists(MOVES_FILE):
         save_moves({})
