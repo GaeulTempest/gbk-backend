@@ -25,6 +25,12 @@ def save_moves(data):
 def index():
     return jsonify({"message": "Gunting Batu Kertas Backend is Running!"})
 
+@app.route('/get_moves', methods=['GET'])
+def get_moves():
+    moves = load_moves()
+    return jsonify(moves)
+
+
 @app.route('/standby', methods=['POST'])
 def standby():
     data = request.get_json()
