@@ -1,151 +1,144 @@
-from flask import Flask, request, jsonify
-import json
-import time
+# ----------------- server.py -----------------
+"""FastAPI backend providing REST + WebSocket for real‑time updates.
+
+* SQLite (via SQLModel) for atomic state storage.
+* Each match identified by UUID game_id; each player by UUID player_id.
+* Simple bearer token (player_id) used for auth.
+• WebSocket channel /ws/{game_id}/{player_id} → pushes state changes.
+"""
+
 import os
+import uuid
+from enum import Enum
+from typing import Optional
 
-app = Flask(__name__)
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, status, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from sqlmodel import Field, SQLModel, create_engine, Session, select
 
-MOVES_FILE = "moves.json"
-STATS_FILE = "stats.json"
-TIMEOUT = 60  # Timeout 60 detik
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///rps.db")
+engine = create_engine(DATABASE_URL, echo=False)
 
-# --- Load and Save Helpers ---
-def load_moves():
-    if not os.path.exists(MOVES_FILE):
-        return {}
-    try:
-        with open(MOVES_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+app = FastAPI(title="RPS Gesture Game API")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-def save_moves(data):
-    with open(MOVES_FILE, "w") as f:
-        json.dump(data, f)
+class MoveEnum(str, Enum):
+    rock = "rock"
+    paper = "paper"
+    scissors = "scissors"
 
-def load_stats():
-    if not os.path.exists(STATS_FILE):
-        return {
-            "Player A": {"win": 0, "lose": 0, "draw": 0},
-            "Player B": {"win": 0, "lose": 0, "draw": 0}
-        }
-    try:
-        with open(STATS_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+class Match(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    p1_id: str
+    p2_id: Optional[str] = None
+    p1_move: Optional[MoveEnum] = None
+    p2_move: Optional[MoveEnum] = None
+    winner: Optional[str] = None  # player_id
 
-def save_stats(data):
-    with open(STATS_FILE, "w") as f:
-        json.dump(data, f)
+SQLModel.metadata.create_all(engine)
 
-# --- Routes ---
-@app.route('/')
-def index():
-    return jsonify({"message": "Server is running!"})
+# ---------- helpers ----------
 
-@app.route('/standby', methods=['POST'])
-def standby():
-    data = request.get_json()
-    if not data or "player" not in data:
-        return jsonify({"error": "Invalid request format."}), 400
-    if data["player"] not in ["A", "B"]:
-        return jsonify({"error": "Invalid player."}), 400
+def judge(m1: MoveEnum, m2: MoveEnum) -> int:
+    """Return 0 draw, 1 if p1 wins, 2 if p2 wins."""
+    rules = {
+        (MoveEnum.rock, MoveEnum.scissors): 1,
+        (MoveEnum.scissors, MoveEnum.paper): 1,
+        (MoveEnum.paper, MoveEnum.rock): 1,
+    }
+    if m1 == m2:
+        return 0
+    return 1 if rules.get((m1, m2)) == 1 else 2
 
-    moves = load_moves()
-    moves[f"{data['player']}_ready"] = True
-    save_moves(moves)
+# ---------- REST endpoints ----------
 
-    return jsonify({"status": f"Player {data['player']} is ready."})
+@app.post("/create_game")
+def create_game():
+    game_id = str(uuid.uuid4())
+    p1_id = str(uuid.uuid4())
+    match = Match(id=game_id, p1_id=p1_id)
+    with Session(engine) as sess:
+        sess.add(match)
+        sess.commit()
+    return {"game_id": game_id, "player_id": p1_id}
 
-@app.route('/get_moves', methods=['GET'])
-def get_moves():
-    moves = load_moves()
-    return jsonify(moves)
+@app.post("/join/{game_id}")
+def join_game(game_id: str):
+    p2_id = str(uuid.uuid4())
+    with Session(engine) as sess:
+        match = sess.get(Match, game_id)
+        if not match:
+            raise HTTPException(status_code=404, detail="Game not found")
+        if match.p2_id:
+            raise HTTPException(status_code=400, detail="Game full")
+        match.p2_id = p2_id
+        sess.add(match)
+        sess.commit()
+    return {"player_id": p2_id}
 
-@app.route('/submit', methods=['POST'])
-def submit():
-    data = request.get_json()
-    if not data or "player" not in data or "move" not in data:
-        return jsonify({"error": "Invalid request format."}), 400
-    if data["player"] not in ["A", "B"]:
-        return jsonify({"error": "Invalid player."}), 400
-    if data["move"] not in ["Batu", "Gunting", "Kertas"]:
-        return jsonify({"error": "Invalid move."}), 400
-
-    moves = load_moves()
-    if "timestamp" not in moves:
-        moves["timestamp"] = time.time()
-
-    moves[data["player"]] = data["move"]
-    save_moves(moves)
-
-    return jsonify({"status": "Move received successfully."})
-
-@app.route('/result', methods=['GET'])
-def result():
-    moves = load_moves()
-    if "timestamp" in moves:
-        elapsed = time.time() - moves["timestamp"]
-        if elapsed > TIMEOUT:
-            save_moves({})
-            return jsonify({"status": "Timeout"})
-
-    if "A" in moves and "B" in moves:
-        a = moves["A"]
-        b = moves["B"]
-
-        if a == b:
-            winner = "Seri"
-        elif (a == "Batu" and b == "Gunting") or (a == "Gunting" and b == "Kertas") or (a == "Kertas" and b == "Batu"):
-            winner = "Player A Menang"
+@app.post("/move/{game_id}")
+def submit_move(game_id: str, player_id: str, move: MoveEnum):
+    with Session(engine) as sess:
+        match = sess.get(Match, game_id)
+        if not match or player_id not in {match.p1_id, match.p2_id}:
+            raise HTTPException(status_code=403, detail="Invalid player")
+        if player_id == match.p1_id:
+            match.p1_move = move
         else:
-            winner = "Player B Menang"
+            match.p2_move = move
 
-        # Update stats
-        stats = load_stats()
-        if winner == "Seri":
-            stats["Player A"]["draw"] += 1
-            stats["Player B"]["draw"] += 1
-        elif winner == "Player A Menang":
-            stats["Player A"]["win"] += 1
-            stats["Player B"]["lose"] += 1
-        else:
-            stats["Player A"]["lose"] += 1
-            stats["Player B"]["win"] += 1
-        save_stats(stats)
+        # judge if both moves present
+        if match.p1_move and match.p2_move and not match.winner:
+            res = judge(match.p1_move, match.p2_move)
+            if res == 0:
+                match.winner = "draw"
+            elif res == 1:
+                match.winner = match.p1_id
+            else:
+                match.winner = match.p2_id
+        sess.add(match)
+        sess.commit()
+    return {"status": "ok"}
 
-        save_moves({
-            "A": a,
-            "B": b,
-            "result": winner,
-            "result_ready": True
-        })
+@app.get("/state/{game_id}")
+def get_state(game_id: str):
+    with Session(engine) as sess:
+        match = sess.get(Match, game_id)
+        if not match:
+            raise HTTPException(status_code=404, detail="Game not found")
+        return match.dict()
 
-        return jsonify({
-            "A": a,
-            "B": b,
-            "result": winner
-        })
+# ---------- WebSocket ----------
 
-    return jsonify({"status": "Waiting for opponent's move..."})
+connections = {}
 
-@app.route('/stats', methods=['GET'])
-def stats():
-    stats = load_stats()
-    return jsonify(stats)
+@app.websocket("/ws/{game_id}/{player_id}")
+async def ws_game(websocket: WebSocket, game_id: str, player_id: str):
+    await websocket.accept()
+    connections.setdefault(game_id, set()).add(websocket)
+    try:
+        while True:
+            # keep alive ping‑pong
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        connections[game_id].remove(websocket)
 
-@app.route('/reset', methods=['POST'])
-def reset():
-    save_moves({})
-    return jsonify({"status": "Game reset successfully."})
+# small utility to broadcast update
+async def broadcast(game_id: str, payload: dict):
+    import asyncio
+    for ws in list(connections.get(game_id, [])):
+        try:
+            await ws.send_json(payload)
+        except RuntimeError:
+            connections[game_id].discard(ws)
+    await asyncio.sleep(0)  # yield
 
-if __name__ == '__main__':
-    if not os.path.exists(MOVES_FILE):
-        save_moves({})
-    if not os.path.exists(STATS_FILE):
-        save_stats({
-            "Player A": {"win": 0, "lose": 0, "draw": 0},
-            "Player B": {"win": 0, "lose": 0, "draw": 0}
-        })
-    app.run(host='0.0.0.0', port=8080)
+# call broadcast after each move using FastAPI event hook
+from fastapi import BackgroundTasks
+
+@app.post("/move_ws/{game_id}")
+async def ws_submit_move(game_id: str, player_id: str, move: MoveEnum, background_tasks: BackgroundTasks):
+    submit_move(game_id, player_id, move)  # reuse logic
+    state = get_state(game_id)
+    background_tasks.add_task(broadcast, game_id, state)
+    return {"status": "ok"}
