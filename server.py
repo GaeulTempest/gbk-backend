@@ -2,7 +2,6 @@
 import os
 import uuid
 import pathlib
-
 from enum import Enum
 from typing import Optional, Set, Dict
 
@@ -16,37 +15,19 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Field, SQLModel, Session, create_engine
 
-# --- 1) Tentukan URL database (tulis-aman) ---
+# 1) Tentukan URL SQLite di direktori write-able Railway (/railway/tmp, /tmp)
 def _default_sqlite_url() -> str:
-    # Cek direktori writable platform (Railway /tmp)
     for p in ("/railway/tmp", "/tmp"):
-        if pathlib.Path(p).exists():
-            # Pastikan foldernya ada
-            pathlib.Path(p).mkdir(parents=True, exist_ok=True)
+        path = pathlib.Path(p)
+        if path.exists() or (path.parent.exists()):
+            path.mkdir(parents=True, exist_ok=True)
             return f"sqlite:///{p}/rps.db"
-    # fallback local
-    return "sqlite:///rps.db"
+    return "sqlite:///rps.db"  # fallback lokal
 
 DATABASE_URL = os.getenv("DATABASE_URL", _default_sqlite_url())
-
-# --- 2) Buat engine & tabel di startup ---
 engine = create_engine(DATABASE_URL, echo=False)
 
-app = FastAPI(title="RPS Gesture Game API")
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
-
-@app.get("/", include_in_schema=False)
-def health_check():
-    return {"status": "ok"}
-
-@app.on_event("startup")
-def on_startup():
-    SQLModel.metadata.create_all(engine)
-
-
-# --- 3) Model & helper ---
+# 2) Definisi model
 class MoveEnum(str, Enum):
     rock = "rock"
     paper = "paper"
@@ -58,8 +39,25 @@ class Match(SQLModel, table=True):
     p2_id: Optional[str] = None
     p1_move: Optional[MoveEnum] = None
     p2_move: Optional[MoveEnum] = None
-    winner: Optional[str] = None  # "draw" or player_id
+    winner: Optional[str] = None  # "draw" atau player_id
 
+# 3) Inisialisasi FastAPI + CORS
+app = FastAPI(title="RPS Gesture Game API")
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+)
+
+# 4) Health-check supaya Railway tidak SIGTERM container
+@app.get("/", include_in_schema=False)
+def health_check():
+    return {"status": "ok"}
+
+# 5) Create tables sekali di startup
+@app.on_event("startup")
+def on_startup():
+    SQLModel.metadata.create_all(engine)
+
+# 6) Helper: aturan suit dan penyimpanan moves
 def judge(m1: MoveEnum, m2: MoveEnum) -> int:
     beats = {
         (MoveEnum.rock, MoveEnum.scissors),
@@ -71,7 +69,7 @@ def judge(m1: MoveEnum, m2: MoveEnum) -> int:
     return 1 if (m1, m2) in beats else 2
 
 def _submit(game_id: str, player_id: str, move: MoveEnum) -> dict:
-    """Simpan gerakan & return state sebagai dict sebelum Session ditutup."""
+    """Simpan move, commit, dan kembalikan state sebagai dict sebelum session ditutup."""
     with Session(engine) as sess:
         g = sess.get(Match, game_id)
         if not g or player_id not in {g.p1_id, g.p2_id}:
@@ -81,7 +79,7 @@ def _submit(game_id: str, player_id: str, move: MoveEnum) -> dict:
             g.p1_move = move
         else:
             g.p2_move = move
-        # hitung winner
+        # hitung pemenang
         if g.p1_move and g.p2_move and not g.winner:
             res = judge(g.p1_move, g.p2_move)
             g.winner = (
@@ -91,13 +89,12 @@ def _submit(game_id: str, player_id: str, move: MoveEnum) -> dict:
             )
         sess.add(g)
         sess.commit()
+        # Kembalikan dict agar broadcast tidak trigger DetachedInstanceError
         return g.dict()
 
-
-# --- 4) REST endpoints ---
+# 7) REST-API endpoints
 @app.post("/create_game")
 def create_game():
-    # bikin match baru
     g = Match(id=str(uuid.uuid4()), p1_id=str(uuid.uuid4()))
     with Session(engine) as sess:
         sess.add(g)
@@ -130,8 +127,7 @@ def get_state(game_id: str):
             raise HTTPException(404, "Game not found")
         return g.dict()
 
-
-# --- 5) WebSocket for real-time updates ---
+# 8) WebSocket untuk real-time broadcast
 connections: Dict[str, Set[WebSocket]] = {}
 
 @app.websocket("/ws/{game_id}/{player_id}")
@@ -140,8 +136,7 @@ async def websocket_endpoint(ws: WebSocket, game_id: str, player_id: str):
     connections.setdefault(game_id, set()).add(ws)
     try:
         while True:
-            # tunggu ping dari client
-            await ws.receive_text()
+            await ws.receive_text()  # ping dari client
     except WebSocketDisconnect:
         connections[game_id].discard(ws)
 
