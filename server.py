@@ -36,6 +36,11 @@ class Match(SQLModel, table=True):
 app = FastAPI(title="RPS Gesture Game API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+@app.get("/")
+def health():
+    return {"status": "ok"}
+
+
 @app.on_event("startup")
 def on_startup():
     # create db & table once per worker
