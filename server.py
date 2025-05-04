@@ -1,5 +1,5 @@
 # ----------------- server.py -----------------
-import os, uuid, asyncio
+import os, uuid, pathlib, asyncio
 from enum import Enum
 from typing import Optional, Set, Dict
 
@@ -7,11 +7,18 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Back
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Field, SQLModel, Session, create_engine
 
-# ⬇️ Fallback ke SQLite bila DATABASE_URL tidak ada
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///rps.db")
+# ---------- DATABASE (auto‑writeable path) ----------
+def _default_sqlite_url() -> str:
+    """Cari direktori writeable di Railway, lalu fallback lokal."""
+    for p in ("/railway/tmp", "/tmp"):
+        if pathlib.Path(p).exists():
+            return f"sqlite:///{p}/rps.db"
+    return "sqlite:///rps.db"          # dev local
+
+DATABASE_URL = os.getenv("DATABASE_URL", _default_sqlite_url())
 engine = create_engine(DATABASE_URL, echo=False)
 
-# ---------- Model ----------
+# ---------- Models ----------
 class MoveEnum(str, Enum):
     rock = "rock"
     paper = "paper"
@@ -31,10 +38,10 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.on_event("startup")
 def on_startup():
-    # dipanggil sekali per worker ➜ tabel dibuat bila belum ada
+    # create db & table once per worker
     SQLModel.metadata.create_all(engine)
 
-# ---------- Util ----------
+# ---------- Helpers ----------
 def judge(m1: MoveEnum, m2: MoveEnum) -> int:
     beats = {(MoveEnum.rock, MoveEnum.scissors),
              (MoveEnum.scissors, MoveEnum.paper),
@@ -91,7 +98,7 @@ async def ws_game(ws: WebSocket, game_id: str, player_id: str):
     connections.setdefault(game_id, set()).add(ws)
     try:
         while True:
-            await ws.receive_text()  # ping
+            await ws.receive_text()   # ping‑pong
     except WebSocketDisconnect:
         connections[game_id].discard(ws)
 
