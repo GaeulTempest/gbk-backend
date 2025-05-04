@@ -1,5 +1,5 @@
 # ----------------- server.py -----------------
-import os, uuid, pathlib, asyncio
+import os, uuid, pathlib
 from enum import Enum
 from typing import Optional, Set, Dict
 
@@ -7,18 +7,17 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Back
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Field, SQLModel, Session, create_engine
 
-# ---------- DATABASE (auto‑writeable path) ----------
+# ---------- DATABASE (writeable path) ----------
 def _default_sqlite_url() -> str:
-    """Cari direktori writeable di Railway, lalu fallback lokal."""
     for p in ("/railway/tmp", "/tmp"):
         if pathlib.Path(p).exists():
             return f"sqlite:///{p}/rps.db"
-    return "sqlite:///rps.db"          # dev local
+    return "sqlite:///rps.db"  # local dev fallback
 
 DATABASE_URL = os.getenv("DATABASE_URL", _default_sqlite_url())
 engine = create_engine(DATABASE_URL, echo=False)
 
-# ---------- Models ----------
+# ---------- MODELS ----------
 class MoveEnum(str, Enum):
     rock = "rock"
     paper = "paper"
@@ -30,34 +29,48 @@ class Match(SQLModel, table=True):
     p2_id: Optional[str] = None
     p1_move: Optional[MoveEnum] = None
     p2_move: Optional[MoveEnum] = None
-    winner: Optional[str] = None  # "draw" atau player_id
+    winner: Optional[str] = None  # "draw" ‑or‑ player_id
 
-# ---------- FastAPI ----------
-app = FastAPI(title="RPS Gesture Game API")
+# ---------- APP ----------
+app = FastAPI(title="RPS Gesture Game API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# health‑check root
 @app.get("/", include_in_schema=False)
 def root():
-    # balasan teks sederhana → Railway cukup 200 OK
     return "ok"
-
-
-@app.get("/")
-def health():
-    return {"status": "ok"}
-
 
 @app.on_event("startup")
 def on_startup():
-    # create db & table once per worker
     SQLModel.metadata.create_all(engine)
 
-# ---------- Helpers ----------
+# ---------- HELPERS ----------
 def judge(m1: MoveEnum, m2: MoveEnum) -> int:
     beats = {(MoveEnum.rock, MoveEnum.scissors),
              (MoveEnum.scissors, MoveEnum.paper),
              (MoveEnum.paper, MoveEnum.rock)}
     return 0 if m1 == m2 else 1 if (m1, m2) in beats else 2
+
+def _submit(game_id: str, player_id: str, move: MoveEnum) -> dict:
+    """Simpan gerakan; kembalikan dict state (detached‑safe)."""
+    with Session(engine) as s:
+        g: Match = s.get(Match, game_id)
+        if not g or player_id not in {g.p1_id, g.p2_id}:
+            raise HTTPException(403, "Invalid player")
+        if player_id == g.p1_id:
+            g.p1_move = move
+        else:
+            g.p2_move = move
+
+        # tentukan pemenang
+        if g.p1_move and g.p2_move and not g.winner:
+            res = judge(g.p1_move, g.p2_move)
+            g.winner = ("draw" if res == 0 else
+                        g.p1_id if res == 1 else g.p2_id)
+
+        s.add(g)
+        s.commit()
+        return g.dict()
 
 # ---------- REST ----------
 @app.post("/create_game")
@@ -71,22 +84,13 @@ def create_game():
 def join(game_id: str):
     with Session(engine) as s:
         g = s.get(Match, game_id)
-        if not g: raise HTTPException(404, "Game not found")
-        if g.p2_id: raise HTTPException(400, "Game full")
-        g.p2_id = str(uuid.uuid4()); s.add(g); s.commit()
+        if not g:
+            raise HTTPException(404, "Game not found")
+        if g.p2_id:
+            raise HTTPException(400, "Game full")
+        g.p2_id = str(uuid.uuid4())
+        s.add(g); s.commit()
     return {"player_id": g.p2_id}
-
-def _submit(game_id: str, player_id: str, move: MoveEnum):
-    with Session(engine) as s:
-        g = s.get(Match, game_id)
-        if not g or player_id not in {g.p1_id, g.p2_id}:
-            raise HTTPException(403, "Invalid player")
-        if player_id == g.p1_id: g.p1_move = move
-        else: g.p2_move = move
-        if g.p1_move and g.p2_move and not g.winner:
-            res = judge(g.p1_move, g.p2_move)
-            g.winner = "draw" if res == 0 else g.p1_id if res == 1 else g.p2_id
-        s.add(g); s.commit(); return g
 
 @app.post("/move/{game_id}")
 def move(game_id: str, player_id: str, move: MoveEnum):
@@ -97,10 +101,11 @@ def move(game_id: str, player_id: str, move: MoveEnum):
 def state(game_id: str):
     with Session(engine) as s:
         g = s.get(Match, game_id)
-        if not g: raise HTTPException(404, "Game not found")
+        if not g:
+            raise HTTPException(404, "Game not found")
         return g.dict()
 
-# ---------- WebSocket ----------
+# ---------- WEBSOCKET ----------
 connections: Dict[str, Set[WebSocket]] = {}
 
 @app.websocket("/ws/{game_id}/{player_id}")
@@ -109,18 +114,19 @@ async def ws_game(ws: WebSocket, game_id: str, player_id: str):
     connections.setdefault(game_id, set()).add(ws)
     try:
         while True:
-            await ws.receive_text()   # ping‑pong
+            await ws.receive_text()  # ping‑pong
     except WebSocketDisconnect:
         connections[game_id].discard(ws)
 
-async def broadcast(game_id: str, payload: dict):
+async def _broadcast(game_id: str, payload: dict):
     for ws in list(connections.get(game_id, [])):
-        try:    await ws.send_json(payload)
+        try:
+            await ws.send_json(payload)
         except RuntimeError:
             connections[game_id].discard(ws)
 
 @app.post("/move_ws/{game_id}")
 async def move_ws(game_id: str, player_id: str, move: MoveEnum, bg: BackgroundTasks):
-    g = _submit(game_id, player_id, move)
-    bg.add_task(broadcast, game_id, g.dict())
+    state_dict = _submit(game_id, player_id, move)
+    bg.add_task(_broadcast, game_id, state_dict)
     return {"status": "ok"}
