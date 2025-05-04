@@ -16,6 +16,8 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Field, SQLModel, Session, create_engine
+from fastapi import FastAPI
+app = FastAPI()
 
 # ---------- DB setup ----------
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///rps.db")
