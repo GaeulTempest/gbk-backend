@@ -36,6 +36,12 @@ class Match(SQLModel, table=True):
 app = FastAPI(title="RPS Gesture Game API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+@app.get("/", include_in_schema=False)
+def root():
+    # balasan teks sederhana → Railway cukup 200 OK
+    return "ok"
+
+
 @app.get("/")
 def health():
     return {"status": "ok"}
