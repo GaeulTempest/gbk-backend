@@ -3,3 +3,4 @@ uvicorn[standard]
 sqlmodel
 psycopg2-binary       # driver PostgreSQL Railway
 websockets            # (FastAPI WS uses this indirectly)
+gunicorn
