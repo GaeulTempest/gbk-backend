@@ -14,6 +14,17 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Field, SQLModel, Session, create_engine
+from fastapi import FastAPI
+import os, pathlib
+
+app = FastAPI(title="RPS Gesture Game API")
+
+@app.get("/", include_in_schema=False)
+def health_check():
+    return {"status": "ok"}
+
+# … rest of your imports & code …
+
 
 # 1) Tentukan URL SQLite di direktori write-able Railway (/railway/tmp, /tmp)
 def _default_sqlite_url() -> str:
