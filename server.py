@@ -1,6 +1,6 @@
 import os
 import uuid
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Field, SQLModel, Session, create_engine
@@ -31,8 +31,8 @@ class Match(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     p1_id: str
     p2_id: str | None = None
-    p1_name: str  # Added player name for player 1
-    p2_name: str | None = None  # Added player name for player 2
+    p1_name: str
+    p2_name: str | None = None
     p1_move: str | None = None
     p2_move: str | None = None
     winner: str | None = None
@@ -61,15 +61,18 @@ def create_game(request: CreateGameRequest):
     new_game = Match(p1_id=str(uuid.uuid4()), p1_name=player_name)
     with Session(engine) as session:
         session.add(new_game)
-        session.commit()
-        session.refresh(new_game)
+        try:
+            session.commit()  # Commit transaction to save new game
+            session.refresh(new_game)  # Refresh the game object after commit
+        except Exception as e:
+            logger.error(f"Error while committing game creation: {e}")
+            session.rollback()  # Rollback if there is an error
+            raise HTTPException(status_code=500, detail="Error creating the game")
     
     logger.info(f"New game created with ID: {new_game.id}")
     return {"game_id": new_game.id, "player_id": new_game.p1_id, "player_name": new_game.p1_name}
 
 # Endpoint for a player to join an existing game (using POST)
-@app.post("/join/{game_id}")
-# Endpoint untuk pemain bergabung dengan game yang sudah ada (menggunakan POST)
 @app.post("/join/{game_id}")
 def join_game(game_id: str, request: JoinGameRequest):
     player_name = request.player_name
@@ -93,7 +96,6 @@ def join_game(game_id: str, request: JoinGameRequest):
     logger.info(f"Player {player_name} joined the game. Game ID: {game_id}")
     return {"player_id": game.p2_id, "player_name": game.p2_name}
 
-
 # Endpoint to get the current state of the game
 @app.get("/state/{game_id}")
 def get_game_state(game_id: str):
@@ -104,34 +106,22 @@ def get_game_state(game_id: str):
             raise HTTPException(status_code=404, detail="Game not found")
         return game.dict()
 
-# Endpoint to handle the moves of each player
-@app.post("/move/{game_id}")
-def move(game_id: str, player_id: str, move: str):
-    logger.info(f"Player {player_id} making move in game {game_id}: {move}")
+# WebSocket endpoint for player communication during the game
+@app.websocket("/ws/{game_id}/{player_id}")
+async def websocket_endpoint(websocket: WebSocket, game_id: str, player_id: str):
     with Session(engine) as session:
         game = session.get(Match, game_id)
         if not game:
-            raise HTTPException(status_code=404, detail="Game not found")
-        if player_id == game.p1_id:
-            game.p1_move = move
-        elif player_id == game.p2_id:
-            game.p2_move = move
-        else:
-            raise HTTPException(status_code=400, detail="Player not in game")
-        
-        # Determine winner if both players have made their moves
-        if game.p1_move and game.p2_move and not game.winner:
-            if game.p1_move == game.p2_move:
-                game.winner = "draw"
-            elif (game.p1_move == "rock" and game.p2_move == "scissors") or \
-                 (game.p1_move == "scissors" and game.p2_move == "paper") or \
-                 (game.p1_move == "paper" and game.p2_move == "rock"):
-                game.winner = game.p1_id
-            else:
-                game.winner = game.p2_id
-        
-        session.add(game)
-        session.commit()
-        session.refresh(game)
-    logger.info(f"Game {game_id} updated. Winner: {game.winner if game.winner else 'TBD'}")
-    return {"status": "ok", "winner": game.winner}
+            await websocket.close(code=4000)  # Invalid game
+            return
+        if player_id not in [game.p1_id, game.p2_id]:
+            await websocket.close(code=4001)  # Invalid player
+            return
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Process the data received from the player
+            await websocket.send_text(f"Data received: {data}")
+    except WebSocketDisconnect:
+        logger.info(f"Player {player_id} disconnected from game {game_id}")
