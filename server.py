@@ -1,6 +1,7 @@
 import os
 import uuid
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel  # Gunakan Pydantic untuk validasi input
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Field, SQLModel, Session, create_engine
 import logging
@@ -42,22 +43,39 @@ def on_startup():
     SQLModel.metadata.create_all(engine)
     logger.info("Database tables created.")
 
+# Pydantic model to validate request data for creating game and joining game
+class CreateGameRequest(BaseModel):
+    player_name: str
+
+class JoinGameRequest(BaseModel):
+    player_name: str
+
 # Endpoint to create a new game
 @app.post("/create_game")
-def create_game(player_name: str):
+def create_game(request: CreateGameRequest):
+    player_name = request.player_name
     logger.info(f"Creating new game for player: {player_name}")
+    if not player_name:
+        raise HTTPException(status_code=400, detail="Player name is required")
+    
     new_game = Match(p1_id=str(uuid.uuid4()), p1_name=player_name)
     with Session(engine) as session:
         session.add(new_game)
         session.commit()
         session.refresh(new_game)
+    
     logger.info(f"New game created with ID: {new_game.id}")
     return {"game_id": new_game.id, "player_id": new_game.p1_id, "player_name": new_game.p1_name}
 
 # Endpoint for a player to join an existing game
 @app.post("/join/{game_id}")
-def join_game(game_id: str, player_name: str):
+def join_game(game_id: str, request: JoinGameRequest):
+    player_name = request.player_name
     logger.info(f"Player {player_name} trying to join game with ID: {game_id}")
+    
+    if not player_name:
+        raise HTTPException(status_code=400, detail="Player name is required")
+    
     with Session(engine) as session:
         game = session.get(Match, game_id)
         if not game:
@@ -69,6 +87,7 @@ def join_game(game_id: str, player_name: str):
         session.add(game)
         session.commit()
         session.refresh(game)
+    
     logger.info(f"Player {player_name} joined the game. Game ID: {game_id}")
     return {"player_id": game.p2_id, "player_name": game.p2_name}
 
@@ -113,6 +132,3 @@ def move(game_id: str, player_id: str, move: str):
         session.refresh(game)
     logger.info(f"Game {game_id} updated. Winner: {game.winner if game.winner else 'TBD'}")
     return {"status": "ok", "winner": game.winner}
-
-# WebSocket endpoint for real-time game interaction (if using WebSockets)
-# Example of a WebSocket route could be implemented here as needed.
