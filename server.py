@@ -69,6 +69,8 @@ def create_game(request: CreateGameRequest):
 
 # Endpoint for a player to join an existing game (using POST)
 @app.post("/join/{game_id}")
+# Endpoint untuk pemain bergabung dengan game yang sudah ada (menggunakan POST)
+@app.post("/join/{game_id}")
 def join_game(game_id: str, request: JoinGameRequest):
     player_name = request.player_name
     logger.info(f"Player {player_name} trying to join game with ID: {game_id}")
@@ -90,6 +92,7 @@ def join_game(game_id: str, request: JoinGameRequest):
     
     logger.info(f"Player {player_name} joined the game. Game ID: {game_id}")
     return {"player_id": game.p2_id, "player_name": game.p2_name}
+
 
 # Endpoint to get the current state of the game
 @app.get("/state/{game_id}")
