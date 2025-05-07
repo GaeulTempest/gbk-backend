@@ -1,7 +1,7 @@
 import os
 import uuid
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel  # Gunakan Pydantic untuk validasi input
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Field, SQLModel, Session, create_engine
 import logging
@@ -67,7 +67,7 @@ def create_game(request: CreateGameRequest):
     logger.info(f"New game created with ID: {new_game.id}")
     return {"game_id": new_game.id, "player_id": new_game.p1_id, "player_name": new_game.p1_name}
 
-# Endpoint for a player to join an existing game
+# Endpoint for a player to join an existing game (using POST)
 @app.post("/join/{game_id}")
 def join_game(game_id: str, request: JoinGameRequest):
     player_name = request.player_name
