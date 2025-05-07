@@ -3,74 +3,89 @@ import uuid
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Field, SQLModel, Session, create_engine
+import logging
 
-# ----------------- FastAPI instance -----------------
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# FastAPI instance
 app = FastAPI()
 
-# ----------------- CORS Middleware -----------------
-# Menambahkan CORS untuk memungkinkan akses dari semua origin
+# CORS Middleware to allow all origins (adjust for your security needs)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Mengizinkan semua origin
+    allow_origins=["*"],  # This allows all origins, modify this for production
     allow_credentials=True,
-    allow_methods=["*"],  # Mengizinkan semua metode HTTP
-    allow_headers=["*"],  # Mengizinkan semua header
+    allow_methods=["*"],  # Allow all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allow all headers
 )
 
-# ----------------- Database Setup -----------------
-# URL database, dapat menggunakan PostgreSQL atau SQLite
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")  # Default ke SQLite jika tidak ada URL
+# Database configuration
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")  # Default SQLite if not set
 engine = create_engine(DATABASE_URL, echo=True)
 
-# ----------------- Database Model -----------------
-# Model untuk menyimpan data pertandingan
+# SQLModel for creating the database table
 class Match(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     p1_id: str
     p2_id: str | None = None
+    p1_name: str  # Added player name for player 1
+    p2_name: str | None = None  # Added player name for player 2
     p1_move: str | None = None
     p2_move: str | None = None
     winner: str | None = None
 
-# ----------------- Create Tables -----------------
-# Buat tabel di database jika belum ada
+# Create the tables when the app starts
 @app.on_event("startup")
 def on_startup():
     SQLModel.metadata.create_all(engine)
+    logger.info("Database tables created.")
 
-# ----------------- API Endpoints -----------------
-@app.get("/")
-def read_root():
-    return {"message": "Hello, World!"}
-
-# Endpoint untuk membuat game baru
+# Endpoint to create a new game
 @app.post("/create_game")
-def create_game():
-    new_game = Match(p1_id=str(uuid.uuid4()))
+def create_game(player_name: str):
+    logger.info(f"Creating new game for player: {player_name}")
+    new_game = Match(p1_id=str(uuid.uuid4()), p1_name=player_name)
     with Session(engine) as session:
         session.add(new_game)
         session.commit()
         session.refresh(new_game)
-    return {"game_id": new_game.id, "player_id": new_game.p1_id}
+    logger.info(f"New game created with ID: {new_game.id}")
+    return {"game_id": new_game.id, "player_id": new_game.p1_id, "player_name": new_game.p1_name}
 
-# Endpoint untuk bergabung ke game
+# Endpoint for a player to join an existing game
 @app.post("/join/{game_id}")
-def join_game(game_id: str):
+def join_game(game_id: str, player_name: str):
+    logger.info(f"Player {player_name} trying to join game with ID: {game_id}")
     with Session(engine) as session:
         game = session.get(Match, game_id)
         if not game:
             raise HTTPException(status_code=404, detail="Game not found")
         if game.p2_id:
-            raise HTTPException(status_code=400, detail="Game full")
+            raise HTTPException(status_code=400, detail="Game is full")
         game.p2_id = str(uuid.uuid4())
+        game.p2_name = player_name
         session.add(game)
         session.commit()
         session.refresh(game)
-    return {"player_id": game.p2_id}
+    logger.info(f"Player {player_name} joined the game. Game ID: {game_id}")
+    return {"player_id": game.p2_id, "player_name": game.p2_name}
 
-# Endpoint untuk mengirimkan gerakan pemain (Rock, Paper, Scissors)
+# Endpoint to get the current state of the game
+@app.get("/state/{game_id}")
+def get_game_state(game_id: str):
+    logger.info(f"Fetching state for game with ID: {game_id}")
+    with Session(engine) as session:
+        game = session.get(Match, game_id)
+        if not game:
+            raise HTTPException(status_code=404, detail="Game not found")
+        return game.dict()
+
+# Endpoint to handle the moves of each player
 @app.post("/move/{game_id}")
 def move(game_id: str, player_id: str, move: str):
+    logger.info(f"Player {player_id} making move in game {game_id}: {move}")
     with Session(engine) as session:
         game = session.get(Match, game_id)
         if not game:
@@ -82,7 +97,7 @@ def move(game_id: str, player_id: str, move: str):
         else:
             raise HTTPException(status_code=400, detail="Player not in game")
         
-        # Menilai pemenang jika kedua pemain sudah mengirimkan gerakan
+        # Determine winner if both players have made their moves
         if game.p1_move and game.p2_move and not game.winner:
             if game.p1_move == game.p2_move:
                 game.winner = "draw"
@@ -96,14 +111,8 @@ def move(game_id: str, player_id: str, move: str):
         session.add(game)
         session.commit()
         session.refresh(game)
+    logger.info(f"Game {game_id} updated. Winner: {game.winner if game.winner else 'TBD'}")
     return {"status": "ok", "winner": game.winner}
 
-# Endpoint untuk melihat status game
-@app.get("/state/{game_id}")
-def get_game_state(game_id: str):
-    with Session(engine) as session:
-        game = session.get(Match, game_id)
-        if not game:
-            raise HTTPException(status_code=404, detail="Game not found")
-        return game.dict()
-
+# WebSocket endpoint for real-time game interaction (if using WebSockets)
+# Example of a WebSocket route could be implemented here as needed.
