@@ -1,78 +1,92 @@
-import os
-import uuid
+import os, uuid, logging
+from typing import Optional
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from sqlmodel import Field, SQLModel, Session, create_engine
-import logging
+from sqlmodel import SQLModel, Field, Session, create_engine, select
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# FastAPI instance
+# ───── FastAPI & DB ──────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO); log = logging.getLogger("srv")
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# CORS Middleware to allow all origins (adjust for your security needs)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # This allows all origins, modify this for production
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allow all headers
-)
+DB_URL = os.getenv("DATABASE_URL", "sqlite:///./rps.db")
+engine  = create_engine(DB_URL, echo=False)
 
-# Database configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")  # Default SQLite if not set
-engine = create_engine(DATABASE_URL, echo=True)
-
-# SQLModel for creating the database table
 class Match(SQLModel, table=True):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    p1_id: str
-    p2_id: str | None = None
-    p1_name: str
-    p2_name: str | None = None
-    p1_move: str | None = None
-    p2_move: str | None = None
-    winner: str | None = None
+    id        : str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    p1_id     : str
+    p1_name   : str
+    p1_ready  : bool = False
+    p2_id     : Optional[str] = None
+    p2_name   : Optional[str] = None
+    p2_ready  : bool = False
 
-# Create the tables when the app starts
+class NewGameReq(BaseModel):  player_name: str
+class JoinReq     (BaseModel):  player_name: str
+class ReadyReq    (BaseModel):  player_id  : str
+
 @app.on_event("startup")
-def on_startup():
-    SQLModel.metadata.create_all(engine)
-    logger.info("Database tables created.")
+def _init(): SQLModel.metadata.create_all(engine); log.info("DB ready")
 
-# Pydantic model to validate request data for creating game and joining game
-class CreateGameRequest(BaseModel):
-    player_name: str
+# ───── helpers ───────────────────────────────────────────────────
+def _broadcast(game: Match, msg: dict):
+    # naive in-proc websockets hub
+    for ws in clients.get(game.id, []):
+        try: ws.send_json(msg)
+        except: pass
 
-class JoinGameRequest(BaseModel):
-    player_name: str
+def _state(game: Match):
+    return {
+        "players": {
+            "A": {"id": game.p1_id, "name": game.p1_name, "ready": game.p1_ready},
+            "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready},
+        }
+    }
 
-# Endpoint to create a new game
+# ───── endpoints ─────────────────────────────────────────────────
 @app.post("/create_game")
-def create_game(request: CreateGameRequest):
-    player_name = request.player_name
-    logger.info(f"Creating new game for player: {player_name}")
-    if not player_name:
-        raise HTTPException(status_code=400, detail="Player name is required")
-    
-    new_game = Match(p1_id=str(uuid.uuid4()), p1_name=player_name)
-    with Session(engine) as session:
-        session.add(new_game)
-        try:
-            session.commit()  # Commit transaction to save new game
-            session.refresh(new_game)  # Refresh the game object after commit
-        except Exception as e:
-            logger.error(f"Error while committing game creation: {e}")
-            session.rollback()  # Rollback if there is an error
-            raise HTTPException(status_code=500, detail="Error creating the game")
-    
-    logger.info(f"New game created with ID: {new_game.id}")
-    return {"game_id": new_game.id, "player_id": new_game.p1_id, "player_name": new_game.p1_name}
+def create_game(body: NewGameReq):
+    with Session(engine) as s:
+        g = Match(p1_id=str(uuid.uuid4()), p1_name=body.player_name)
+        s.add(g); s.commit(); s.refresh(g)
+        return {"game_id": g.id, "player_id": g.p1_id, "role": "A"}
 
-# Endpoint for a player to join an existing game (using POST)
-@app.post("/join/{game_id}")
-def join_game(game_id: str, request: JoinGameRequest):
-    player_name
+@app.post("/join/{gid}")
+def join_game(gid: str, body: JoinReq):
+    with Session(engine) as s:
+        g = s.exec(select(Match).where(Match.id==gid)).first()
+        if not g:         raise HTTPException(404,"Game not found")
+        if g.p2_id:       raise HTTPException(400,"Game full")
+        g.p2_id   = str(uuid.uuid4())
+        g.p2_name = body.player_name
+        s.add(g); s.commit(); s.refresh(g)
+        _broadcast(g, _state(g))
+        return {"player_id": g.p2_id, "role": "B"}
+
+@app.post("/ready/{gid}")
+def set_ready(gid:str, body:ReadyReq):
+    with Session(engine) as s:
+        g=s.get(Match,gid);  p=body.player_id
+        if not g or p not in {g.p1_id,g.p2_id}: raise HTTPException(403)
+        if p==g.p1_id: g.p1_ready=True
+        else:          g.p2_ready=True
+        s.add(g); s.commit(); s.refresh(g)
+        _broadcast(g, _state(g))
+        return {"ok":True}
+
+# ───── WebSocket hub ─────────────────────────────────────────────
+clients: dict[str,set[WebSocket]] = {}
+
+@app.websocket("/ws/{gid}/{pid}")
+async def ws(gid:str, pid:str, ws:WebSocket):
+    await ws.accept()
+    clients.setdefault(gid,set()).add(ws)
+    try:
+        with Session(engine) as s:
+            g=s.get(Match,gid)
+            if g: await ws.send_json(_state(g))
+        while True:
+            await ws.receive_text()          # we don't expect messages, ignore
+    except WebSocketDisconnect:
+        clients[gid].discard(ws)
