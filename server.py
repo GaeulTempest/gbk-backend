@@ -85,6 +85,8 @@ async def join_game(gid: str, body: JoinReq):
     await broadcast(g)
     return {"player_id": g.p2_id, "role": "B"}
 
+# di server.py ganti handler ready:
+
 @app.post("/ready/{gid}")
 async def set_ready(gid: str, body: ReadyReq):
     with Session(engine) as s:
@@ -92,12 +94,16 @@ async def set_ready(gid: str, body: ReadyReq):
         if not g or body.player_id not in {g.p1_id, g.p2_id}:
             raise HTTPException(403)
 
-        if body.player_id == g.p1_id: g.p1_ready = True
-        else:                          g.p2_ready = True
+        if body.player_id == g.p1_id:
+            g.p1_ready = True
+        else:
+            g.p2_ready = True
+
         s.add(g); s.commit(); s.refresh(g)
 
     await broadcast(g)
-    return {"ok": True}
+    return state(g)           # ←―  kini kirim seluruh state
+
 
 # ────── WebSocket ───────────────────────────────────────
 @app.websocket("/ws/{gid}/{pid}")
