@@ -1,10 +1,14 @@
-import os, uuid, logging, asyncio
+import os
+import uuid
+import logging
+import asyncio
+
 from typing import Optional, Dict, Set
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlmodel import SQLModel, Field, Session, create_engine, select
+from sqlmodel import SQLModel, Field, Session, create_engine
 
 # ────── init & logging ──────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -18,7 +22,16 @@ app.add_middleware(
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./rps.db")
-engine = create_engine(DATABASE_URL, echo=False)
+
+# ─── buat engine dengan check_same_thread=False jika SQLite ────────
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(
+        DATABASE_URL,
+        echo=False,
+        connect_args={"check_same_thread": False},
+    )
+else:
+    engine = create_engine(DATABASE_URL, echo=False)
 
 # ────── models ──────────────────────────────────────────
 class Match(SQLModel, table=True):
@@ -40,9 +53,14 @@ def state(g: Match) -> dict:
     }
 
 # ────── schemas ─────────────────────────────────────────
-class NewGame(BaseModel):  player_name: str
-class JoinReq(BaseModel):  player_name: str
-class ReadyReq(BaseModel): player_id: str
+class NewGame(BaseModel):
+    player_name: str
+
+class JoinReq(BaseModel):
+    player_name: str
+
+class ReadyReq(BaseModel):
+    player_id: str
 
 # ────── DB init ─────────────────────────────────────────
 @app.on_event("startup")
@@ -57,19 +75,29 @@ def create_game(body: NewGame):
         raise HTTPException(400, "player_name empty")
     with Session(engine) as s:
         g = Match(p1_id=str(uuid.uuid4()), p1_name=body.player_name.strip())
-        s.add(g); s.commit(); s.refresh(g)
+        s.add(g)
+        s.commit()
+        s.refresh(g)
     return {"game_id": g.id, "player_id": g.p1_id, "role": "A"}
 
 @app.post("/join/{gid}")
 def join_game(gid: str, body: JoinReq):
     with Session(engine) as s:
         g = s.get(Match, gid)
-        if not g:          raise HTTPException(404, "Game not found")
-        if g.p2_id:        raise HTTPException(400, "Room full")
+        if not g:
+            raise HTTPException(404, "Game not found")
+        if g.p2_id:
+            raise HTTPException(400, "Room full")
         if not body.player_name.strip():
             raise HTTPException(400, "player_name empty")
-        g.p2_id, g.p2_name = str(uuid.uuid4()), body.player_name.strip()
-        s.add(g); s.commit(); s.refresh(g)
+
+        g.p2_id = str(uuid.uuid4())
+        g.p2_name = body.player_name.strip()
+        s.add(g)
+        s.commit()
+        s.refresh(g)
+
+    # broadcast update ke semua WS klien
     broadcast(g)
     return {"player_id": g.p2_id, "role": "B"}
 
@@ -83,11 +111,13 @@ def set_ready(gid: str, body: ReadyReq):
             g.p1_ready = True
         else:
             g.p2_ready = True
-        s.add(g); s.commit(); s.refresh(g)
+        s.add(g)
+        s.commit()
+        s.refresh(g)
+
     broadcast(g)
     return state(g)
 
-# ---------- NEW:  snapshot state ----------
 @app.get("/state/{gid}")
 def get_state_endpoint(gid: str):
     with Session(engine) as s:
@@ -115,11 +145,13 @@ async def ws_endpoint(gid: str, pid: str, ws: WebSocket):
     await ws.accept()
     clients.setdefault(gid, set()).add(ws)
     try:
-        # send snapshot langsung
+        # kirim snapshot awal
         with Session(engine) as s:
             g = s.get(Match, gid)
-            if g: await ws.send_json(state(g))
+            if g:
+                await ws.send_json(state(g))
+        # ignore incoming, hanya tetap terhubung
         while True:
-            await ws.receive_text()      # ignore messages
+            await ws.receive_text()
     except WebSocketDisconnect:
         clients[gid].discard(ws)
