@@ -137,8 +137,17 @@ async def _send(ws: WebSocket, payload: dict):
 
 def broadcast(game: Match):
     payload = state(game)
+    loop = None
+    try:
+        # dapatkan loop utama (uvicorn)
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        pass
+
     for ws in list(clients.get(game.id, [])):
-        asyncio.create_task(_send(ws, payload))
+        if loop and loop.is_running():
+            # jadwalkan pengiriman tanpa menunggu
+            loop.call_soon_threadsafe(asyncio.create_task, _send(ws, payload))
 
 @app.websocket("/ws/{gid}/{pid}")
 async def ws_endpoint(gid: str, pid: str, ws: WebSocket):
@@ -150,7 +159,7 @@ async def ws_endpoint(gid: str, pid: str, ws: WebSocket):
             g = s.get(Match, gid)
             if g:
                 await ws.send_json(state(g))
-        # ignore incoming, hanya tetap terhubung
+        # tetap buka koneksi, abaikan pesan masuk
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
