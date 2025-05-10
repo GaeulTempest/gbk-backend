@@ -1,81 +1,125 @@
 import os, uuid, logging, asyncio
-from typing import Optional
+from typing import Optional, Dict, Set
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field, Session, create_engine, select
 
+# ────── init & logging ──────────────────────────────────
 logging.basicConfig(level=logging.INFO)
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"],
-                   allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+log = logging.getLogger("srv")
 
-engine = create_engine(os.getenv("DATABASE_URL", "sqlite:///./rps.db"), echo=False)
+app = FastAPI(title="RPS-Gesture Game API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_methods=["*"],
+    allow_headers=["*"], allow_credentials=True
+)
 
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./rps.db")
+engine = create_engine(DATABASE_URL, echo=False)
+
+# ────── models ──────────────────────────────────────────
 class Match(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    p1_id: str;  p1_name: str;  p1_ready: bool = False
-    p2_id: Optional[str] = None;  p2_name: Optional[str] = None;  p2_ready: bool = False
+    p1_id: str
+    p1_name: str
+    p1_ready: bool = False
 
+    p2_id: Optional[str] = None
+    p2_name: Optional[str] = None
+    p2_ready: bool = False
+
+def state(g: Match) -> dict:
+    return {
+        "players": {
+            "A": {"id": g.p1_id, "name": g.p1_name, "ready": g.p1_ready},
+            "B": {"id": g.p2_id, "name": g.p2_name, "ready": g.p2_ready},
+        }
+    }
+
+# ────── schemas ─────────────────────────────────────────
 class NewGame(BaseModel):  player_name: str
 class JoinReq(BaseModel):  player_name: str
 class ReadyReq(BaseModel): player_id: str
 
+# ────── DB init ─────────────────────────────────────────
 @app.on_event("startup")
-def init_db(): SQLModel.metadata.create_all(engine)
+def init_db():
+    SQLModel.metadata.create_all(engine)
+    log.info("Database ready")
 
-clients: dict[str, set[WebSocket]] = {}
-def state(g: Match):                     # serialized game state
-    return {"players": {
-        "A": {"id": g.p1_id, "name": g.p1_name, "ready": g.p1_ready},
-        "B": {"id": g.p2_id, "name": g.p2_name, "ready": g.p2_ready},
-    }}
-
-async def broadcast(g: Match):
-    for ws in list(clients.get(g.id, [])):
-        try: await ws.send_json(state(g))
-        except: clients[g.id].discard(ws)
-
+# ────── HTTP endpoints ──────────────────────────────────
 @app.post("/create_game")
 def create_game(body: NewGame):
-    name = body.player_name.strip() or HTTPException(400, "player_name empty")
+    if not body.player_name.strip():
+        raise HTTPException(400, "player_name empty")
     with Session(engine) as s:
-        game = Match(p1_id=str(uuid.uuid4()), p1_name=name)
-        s.add(game); s.commit(); s.refresh(game)
-    return {"game_id": game.id, "player_id": game.p1_id, "role": "A"}
+        g = Match(p1_id=str(uuid.uuid4()), p1_name=body.player_name.strip())
+        s.add(g); s.commit(); s.refresh(g)
+    return {"game_id": g.id, "player_id": g.p1_id, "role": "A"}
 
 @app.post("/join/{gid}")
-async def join_game(gid: str, body: JoinReq):
-    name = body.player_name.strip() or HTTPException(400, "player_name empty")
+def join_game(gid: str, body: JoinReq):
     with Session(engine) as s:
-        g = s.exec(select(Match).where(Match.id == gid)).first()
-        if not g: raise HTTPException(404, "Game not found")
-        if g.p2_id: raise HTTPException(400, "room full")
-        g.p2_id, g.p2_name = str(uuid.uuid4()), name
+        g = s.get(Match, gid)
+        if not g:          raise HTTPException(404, "Game not found")
+        if g.p2_id:        raise HTTPException(400, "Room full")
+        if not body.player_name.strip():
+            raise HTTPException(400, "player_name empty")
+        g.p2_id, g.p2_name = str(uuid.uuid4()), body.player_name.strip()
         s.add(g); s.commit(); s.refresh(g)
-    await broadcast(g)
+    broadcast(g)
     return {"player_id": g.p2_id, "role": "B"}
 
 @app.post("/ready/{gid}")
-async def ready(gid: str, body: ReadyReq):
+def set_ready(gid: str, body: ReadyReq):
     with Session(engine) as s:
         g = s.get(Match, gid)
-        if not g or body.player_id not in {g.p1_id, g.p2_id}: raise HTTPException(403)
-        if body.player_id == g.p1_id: g.p1_ready = True
-        else:                          g.p2_ready = True
+        if not g or body.player_id not in {g.p1_id, g.p2_id}:
+            raise HTTPException(403, "Invalid player or game")
+        if body.player_id == g.p1_id:
+            g.p1_ready = True
+        else:
+            g.p2_ready = True
         s.add(g); s.commit(); s.refresh(g)
-    await broadcast(g)
-    return state(g)                      # ← kirim snapshot
+    broadcast(g)
+    return state(g)
+
+# ---------- NEW:  snapshot state ----------
+@app.get("/state/{gid}")
+def get_state_endpoint(gid: str):
+    with Session(engine) as s:
+        g = s.get(Match, gid)
+        if not g:
+            raise HTTPException(404, "Game not found")
+        return state(g)
+
+# ────── WebSocket broadcast ─────────────────────────────
+clients: Dict[str, Set[WebSocket]] = {}
+
+async def _send(ws: WebSocket, payload: dict):
+    try:
+        await ws.send_json(payload)
+    except:
+        pass
+
+def broadcast(game: Match):
+    payload = state(game)
+    for ws in list(clients.get(game.id, [])):
+        asyncio.create_task(_send(ws, payload))
 
 @app.websocket("/ws/{gid}/{pid}")
-async def ws(gid: str, pid: str, sock: WebSocket):
-    await sock.accept()
-    clients.setdefault(gid, set()).add(sock)
+async def ws_endpoint(gid: str, pid: str, ws: WebSocket):
+    await ws.accept()
+    clients.setdefault(gid, set()).add(ws)
     try:
+        # send snapshot langsung
         with Session(engine) as s:
             g = s.get(Match, gid)
-            if g: await sock.send_json(state(g))
-        while True: await sock.receive_text()
+            if g: await ws.send_json(state(g))
+        while True:
+            await ws.receive_text()      # ignore messages
     except WebSocketDisconnect:
-        clients[gid].discard(sock)
+        clients[gid].discard(ws)
