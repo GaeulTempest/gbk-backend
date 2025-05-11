@@ -6,11 +6,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field, Session, create_engine
 
-# ——— Logging & app init ——————————————————————————
+# ——— Logging & App Init ——————————————————
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("srv")
 
-app = FastAPI(title="RPS-Gesture Game API")
+app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"],
@@ -19,11 +19,11 @@ app.add_middleware(
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./rps.db")
 if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(DATABASE_URL, echo=False, connect_args={"check_same_thread": False})
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 else:
-    engine = create_engine(DATABASE_URL, echo=False)
+    engine = create_engine(DATABASE_URL)
 
-# ——— Models ————————————————————————————————————
+# ——— Model ——————————————————————————————
 class Match(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     p1_id: str
@@ -41,33 +41,30 @@ def state(g: Match) -> dict:
             "A": {"id": g.p1_id, "name": g.p1_name, "ready": g.p1_ready},
             "B": {"id": g.p2_id, "name": g.p2_name, "ready": g.p2_ready},
         },
-        "moves": {
-            "A": g.p1_move,
-            "B": g.p2_move,
-        }
+        "moves": {"A": g.p1_move, "B": g.p2_move}
     }
 
-# ——— Schemas ———————————————————————————————————
-class NewGame(BaseModel):   player_name: str
-class JoinReq(BaseModel):   player_name: str
-class ReadyReq(BaseModel):  player_id: str
-class MoveReq(BaseModel):   player_id: str; move: str
+# ——— Schemas —————————————————————————————
+class NewGame(BaseModel):  player_name: str
+class JoinReq(BaseModel):  player_name: str
+class ReadyReq(BaseModel): player_id: str
+class MoveReq(BaseModel):  player_id: str; move: str
 
-# ——— Startup ———————————————————————————————————
+# ——— Startup —————————————————————————————
 @app.on_event("startup")
-def init_db():
+def on_startup():
     SQLModel.metadata.create_all(engine)
-    log.info("Database ready")
+    log.info("DB ready")
 
-# ——— HTTP Endpoints ———————————————————————————
+# ——— HTTP Endpoints ———————————————————————
 @app.post("/create_game")
 def create_game(body: NewGame):
     name = body.player_name.strip()
     if not name:
         raise HTTPException(400, "player_name empty")
-    with Session(engine) as s:
+    with Session(engine) as sess:
         g = Match(p1_id=str(uuid.uuid4()), p1_name=name)
-        s.add(g); s.commit(); s.refresh(g)
+        sess.add(g); sess.commit(); sess.refresh(g)
     return {"game_id": g.id, "player_id": g.p1_id, "role": "A"}
 
 @app.post("/join/{gid}")
@@ -75,69 +72,66 @@ def join_game(gid: str, body: JoinReq):
     name = body.player_name.strip()
     if not name:
         raise HTTPException(400, "player_name empty")
-    with Session(engine) as s:
-        g = s.get(Match, gid)
+    with Session(engine) as sess:
+        g = sess.get(Match, gid)
         if not g:
             raise HTTPException(404, "Game not found")
         if g.p2_id:
             raise HTTPException(400, "Room full")
         g.p2_id, g.p2_name = str(uuid.uuid4()), name
-        s.add(g); s.commit(); s.refresh(g)
+        sess.add(g); sess.commit(); sess.refresh(g)
     broadcast(g)
     return {"player_id": g.p2_id, "role": "B"}
 
 @app.post("/ready/{gid}")
 def set_ready(gid: str, body: ReadyReq):
-    with Session(engine) as s:
-        g = s.get(Match, gid)
+    with Session(engine) as sess:
+        g = sess.get(Match, gid)
         if not g or body.player_id not in {g.p1_id, g.p2_id}:
             raise HTTPException(403, "Invalid player or game")
         if body.player_id == g.p1_id:
             g.p1_ready = True
         else:
             g.p2_ready = True
-        s.add(g); s.commit(); s.refresh(g)
+        sess.add(g); sess.commit(); sess.refresh(g)
     broadcast(g)
     return state(g)
 
 @app.post("/move/{gid}")
 def submit_move(gid: str, body: MoveReq):
-    with Session(engine) as s:
-        g = s.get(Match, gid)
+    with Session(engine) as sess:
+        g = sess.get(Match, gid)
         if not g or body.player_id not in {g.p1_id, g.p2_id}:
             raise HTTPException(403, "Invalid player or game")
         if body.player_id == g.p1_id:
             g.p1_move = body.move
         else:
             g.p2_move = body.move
-        s.add(g); s.commit(); s.refresh(g)
+        sess.add(g); sess.commit(); sess.refresh(g)
     broadcast(g)
     return state(g)
 
+# ←──────────── **IMPORTANT**: STATE ENDPOINT ←────────────
 @app.get("/state/{gid}")
 def get_state_endpoint(gid: str):
-    with Session(engine) as s:
-        g = s.get(Match, gid)
+    with Session(engine) as sess:
+        g = sess.get(Match, gid)
         if not g:
             raise HTTPException(404, "Game not found")
         return state(g)
 
-# ——— WebSocket broadcast ————————————————————————
+# ——— WebSocket Broadcast ———————————————————————
 clients: Dict[str, Set[WebSocket]] = {}
 
 async def _send(ws: WebSocket, payload: dict):
-    try:
-        await ws.send_json(payload)
-    except:
-        pass
+    try: await ws.send_json(payload)
+    except: pass
 
 def broadcast(game: Match):
     payload = state(game)
     loop = None
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        pass
+    try: loop = asyncio.get_event_loop()
+    except RuntimeError: pass
     for ws in list(clients.get(game.id, [])):
         if loop and loop.is_running():
             loop.call_soon_threadsafe(asyncio.create_task, _send(ws, payload))
@@ -147,11 +141,10 @@ async def ws_endpoint(gid: str, pid: str, ws: WebSocket):
     await ws.accept()
     clients.setdefault(gid, set()).add(ws)
     try:
-        # kirim snapshot awal
-        with Session(engine) as s:
-            g = s.get(Match, gid)
-            if g:
-                await ws.send_json(state(g))
+        # kirim snapshot
+        with Session(engine) as sess:
+            g = sess.get(Match, gid)
+            if g: await ws.send_json(state(g))
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
