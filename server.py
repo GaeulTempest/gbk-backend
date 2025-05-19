@@ -64,46 +64,4 @@ def create_game(body: NewGame):
     with Session(engine) as sess:
         g = Match(p1_id=str(uuid.uuid4()), p1_name=name)
         sess.add(g); sess.commit(); sess.refresh(g)
-    return {"game_id": g.id, "player_id": g.p1_id, "role": "A"}
-
-@app.post("/join/{gid}")
-def join_game(gid: str, body: JoinReq):
-    name = body.player_name.strip()
-    if not name:
-        raise HTTPException(400, "player_name empty")
-    with Session(engine) as sess:
-        g = sess.get(Match, gid)
-        if not g:
-            raise HTTPException(404, "Game not found")
-        if g.p2_id:
-            raise HTTPException(400, "Room full")
-        g.p2_id, g.p2_name = str(uuid.uuid4()), name
-        sess.add(g); sess.commit(); sess.refresh(g)
-    broadcast(g)
-    return {"player_id": g.p2_id, "role": "B"}
-
-@app.post("/ready/{gid}")
-def set_ready(gid: str, body: ReadyReq):
-    with Session(engine) as sess:
-        g = sess.get(Match, gid)
-        if not g or body.player_id not in {g.p1_id, g.p2_id}:
-            raise HTTPException(403, "Invalid player or game")
-        if body.player_id == g.p1_id:
-            g.p1_ready = True
-        else:
-            g.p2_ready = True
-        sess.add(g); sess.commit(); sess.refresh(g)
-    broadcast(g)
-    return state(g)
-
-@app.post("/move/{gid}")
-def submit_move(gid: str, body: MoveReq):
-    with Session(engine) as sess:
-        g = sess.get(Match, gid)
-        if not g or body.player_id not in {g.p1_id, g.p2_id}:
-            raise HTTPException(403, "Invalid player or game")
-        if body.player_id == g.p1_id:
-            g.p1_move = body.move
-        else:
-            g.p2_move = body.move
-        sess
+    return
