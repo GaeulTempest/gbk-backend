@@ -33,6 +33,7 @@ class Match(SQLModel, table=True):
     p2_ready: bool = False
     p1_move: Optional[str] = None
     p2_move: Optional[str] = None
+    is_active: bool = True  # Status apakah game masih aktif
 
 def state(g: Match) -> dict:
     return {
@@ -42,81 +43,6 @@ def state(g: Match) -> dict:
         },
         "moves": {"A": g.p1_move, "B": g.p2_move}
     }
-
-# ——— Schemas —————————————————
-class NewGame(BaseModel): player_name: str
-class JoinReq(BaseModel): player_name: str
-class ReadyReq(BaseModel): player_id: str
-class MoveReq(BaseModel): player_id: str; move: str
-
-# ——— Startup —————————————————
-@app.on_event("startup")
-def on_startup():
-    SQLModel.metadata.create_all(engine)
-    log.info("DB ready")
-
-# ——— HTTP Endpoints —————————————————
-@app.post("/create_game")
-def create_game(body: NewGame):
-    name = body.player_name.strip()
-    if not name:
-        raise HTTPException(400, "player_name empty")
-    with Session(engine) as sess:
-        g = Match(p1_id=str(uuid.uuid4()), p1_name=name)
-        sess.add(g); sess.commit(); sess.refresh(g)
-    return {"game_id": g.id, "player_id": g.p1_id, "role": "A"}
-
-@app.post("/join/{gid}")
-def join_game(gid: str, body: JoinReq):
-    name = body.player_name.strip()
-    if not name:
-        raise HTTPException(400, "player_name empty")
-    with Session(engine) as sess:
-        g = sess.get(Match, gid)
-        if not g:
-            raise HTTPException(404, "Game not found")
-        if g.p2_id:
-            raise HTTPException(400, "Room full")
-        g.p2_id, g.p2_name = str(uuid.uuid4()), name
-        sess.add(g); sess.commit(); sess.refresh(g)
-    broadcast(g)
-    return {"player_id": g.p2_id, "role": "B"}
-
-@app.post("/ready/{gid}")
-def set_ready(gid: str, body: ReadyReq):
-    with Session(engine) as sess:
-        g = sess.get(Match, gid)
-        if not g or body.player_id not in {g.p1_id, g.p2_id}:
-            raise HTTPException(403, "Invalid player or game")
-        if body.player_id == g.p1_id:
-            g.p1_ready = True
-        else:
-            g.p2_ready = True
-        sess.add(g); sess.commit(); sess.refresh(g)
-    broadcast(g)
-    return state(g)
-
-@app.post("/move/{gid}")
-def submit_move(gid: str, body: MoveReq):
-    with Session(engine) as sess:
-        g = sess.get(Match, gid)
-        if not g or body.player_id not in {g.p1_id, g.p2_id}:
-            raise HTTPException(403, "Invalid player or game")
-        if body.player_id == g.p1_id:
-            g.p1_move = body.move
-        else:
-            g.p2_move = body.move
-        sess.add(g); sess.commit(); sess.refresh(g)
-    broadcast(g)
-    return state(g)
-
-@app.get("/state/{gid}")
-def get_state_endpoint(gid: str):
-    with Session(engine) as sess:
-        g = sess.get(Match, gid)
-        if not g:
-            raise HTTPException(404, "Game not found")
-        return state(g)
 
 # ——— WebSocket Broadcast —————————————————
 clients: Dict[str, Set[WebSocket]] = {}
@@ -142,17 +68,21 @@ def broadcast(game: Match):
 @app.websocket("/ws/{gid}/{pid}")
 async def ws_endpoint(gid: str, pid: str, ws: WebSocket):
     await ws.accept()
-    
-    # Verifikasi ID pemain dan game
+
+    # Verifikasi Game ID dan Player ID
     with Session(engine) as sess:
         g = sess.get(Match, gid)
-        if not g:
-            log.error(f"Game ID {gid} not found.")
+        
+        if not g or not g.is_active:
+            # Jika game tidak ditemukan atau sudah tidak aktif, kirimkan error dan tutup koneksi
+            log.error(f"Game ID {gid} not found or not active.")
+            await ws.send_json({"error": "Game not found or already ended"})
             await ws.close()
             return
         
         if pid not in {g.p1_id, g.p2_id}:
             log.error(f"Player ID {pid} is not valid for this game.")
+            await ws.send_json({"error": "Player not found in this game"})
             await ws.close()
             return
 
@@ -161,10 +91,15 @@ async def ws_endpoint(gid: str, pid: str, ws: WebSocket):
 
     try:
         while True:
-            # Tunggu pesan dari klien
+            # Tunggu pesan dari klien dan pastikan koneksi tetap stabil
             await ws.receive_text()
+
     except WebSocketDisconnect:
         log.info(f"Connection to game {gid} player {pid} closed.")
-        clients[gid].discard(ws)
+        if gid in clients:
+            clients[gid].discard(ws)
+    except Exception as e:
+        log.error(f"WebSocket error: {e}")
     finally:
+        # Pastikan WebSocket selalu ditutup dengan benar
         await ws.close()
