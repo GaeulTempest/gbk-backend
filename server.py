@@ -1,6 +1,5 @@
 import os, uuid, logging, asyncio
 from typing import Optional, Dict, Set
-
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -23,7 +22,7 @@ if DATABASE_URL.startswith("sqlite"):
 else:
     engine = create_engine(DATABASE_URL)
 
-# ——— Model ——————————————————————————————
+# ——— Model —————————————————
 class Match(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     p1_id: str
@@ -44,19 +43,19 @@ def state(g: Match) -> dict:
         "moves": {"A": g.p1_move, "B": g.p2_move}
     }
 
-# ——— Schemas —————————————————————————————
-class NewGame(BaseModel):  player_name: str
-class JoinReq(BaseModel):  player_name: str
+# ——— Schemas —————————————————
+class NewGame(BaseModel): player_name: str
+class JoinReq(BaseModel): player_name: str
 class ReadyReq(BaseModel): player_id: str
-class MoveReq(BaseModel):  player_id: str; move: str
+class MoveReq(BaseModel): player_id: str; move: str
 
-# ——— Startup —————————————————————————————
+# ——— Startup —————————————————
 @app.on_event("startup")
 def on_startup():
     SQLModel.metadata.create_all(engine)
     log.info("DB ready")
 
-# ——— HTTP Endpoints ———————————————————————
+# ——— HTTP Endpoints —————————————————
 @app.post("/create_game")
 def create_game(body: NewGame):
     name = body.player_name.strip()
@@ -111,7 +110,6 @@ def submit_move(gid: str, body: MoveReq):
     broadcast(g)
     return state(g)
 
-# ←──────────── **IMPORTANT**: STATE ENDPOINT ←────────────
 @app.get("/state/{gid}")
 def get_state_endpoint(gid: str):
     with Session(engine) as sess:
@@ -120,18 +118,23 @@ def get_state_endpoint(gid: str):
             raise HTTPException(404, "Game not found")
         return state(g)
 
-# ——— WebSocket Broadcast ———————————————————————
+# ——— WebSocket Broadcast —————————————————
 clients: Dict[str, Set[WebSocket]] = {}
 
 async def _send(ws: WebSocket, payload: dict):
-    try: await ws.send_json(payload)
-    except: pass
+    try:
+        await ws.send_json(payload)
+    except Exception as e:
+        log.error(f"Error sending data: {e}")
+        pass  # handle errors gracefully
 
 def broadcast(game: Match):
     payload = state(game)
     loop = None
-    try: loop = asyncio.get_event_loop()
-    except RuntimeError: pass
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        pass
     for ws in list(clients.get(game.id, [])):
         if loop and loop.is_running():
             loop.call_soon_threadsafe(asyncio.create_task, _send(ws, payload))
@@ -141,11 +144,15 @@ async def ws_endpoint(gid: str, pid: str, ws: WebSocket):
     await ws.accept()
     clients.setdefault(gid, set()).add(ws)
     try:
-        # kirim snapshot
         with Session(engine) as sess:
             g = sess.get(Match, gid)
-            if g: await ws.send_json(state(g))
+            if g:
+                await ws.send_json(state(g))
         while True:
             await ws.receive_text()
     except WebSocketDisconnect:
+        log.info(f"Connection to game {gid} player {pid} closed.")
         clients[gid].discard(ws)
+        break
+    finally:
+        await ws.close()
