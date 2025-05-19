@@ -64,4 +64,107 @@ def create_game(body: NewGame):
     with Session(engine) as sess:
         g = Match(p1_id=str(uuid.uuid4()), p1_name=name)
         sess.add(g); sess.commit(); sess.refresh(g)
-    return
+    return {"game_id": g.id, "player_id": g.p1_id, "role": "A"}
+
+@app.post("/join/{gid}")
+def join_game(gid: str, body: JoinReq):
+    name = body.player_name.strip()
+    if not name:
+        raise HTTPException(400, "player_name empty")
+    with Session(engine) as sess:
+        g = sess.get(Match, gid)
+        if not g:
+            raise HTTPException(404, "Game not found")
+        if g.p2_id:
+            raise HTTPException(400, "Room full")
+        g.p2_id, g.p2_name = str(uuid.uuid4()), name
+        sess.add(g); sess.commit(); sess.refresh(g)
+    broadcast(g)
+    return {"player_id": g.p2_id, "role": "B"}
+
+@app.post("/ready/{gid}")
+def set_ready(gid: str, body: ReadyReq):
+    with Session(engine) as sess:
+        g = sess.get(Match, gid)
+        if not g or body.player_id not in {g.p1_id, g.p2_id}:
+            raise HTTPException(403, "Invalid player or game")
+        if body.player_id == g.p1_id:
+            g.p1_ready = True
+        else:
+            g.p2_ready = True
+        sess.add(g); sess.commit(); sess.refresh(g)
+    broadcast(g)
+    return state(g)
+
+@app.post("/move/{gid}")
+def submit_move(gid: str, body: MoveReq):
+    with Session(engine) as sess:
+        g = sess.get(Match, gid)
+        if not g or body.player_id not in {g.p1_id, g.p2_id}:
+            raise HTTPException(403, "Invalid player or game")
+        if body.player_id == g.p1_id:
+            g.p1_move = body.move
+        else:
+            g.p2_move = body.move
+        sess.add(g); sess.commit(); sess.refresh(g)
+    broadcast(g)
+    return state(g)
+
+@app.get("/state/{gid}")
+def get_state_endpoint(gid: str):
+    with Session(engine) as sess:
+        g = sess.get(Match, gid)
+        if not g:
+            raise HTTPException(404, "Game not found")
+        return state(g)
+
+# ——— WebSocket Broadcast —————————————————
+clients: Dict[str, Set[WebSocket]] = {}
+
+async def _send(ws: WebSocket, payload: dict):
+    try:
+        await ws.send_json(payload)
+    except Exception as e:
+        log.error(f"Error sending data: {e}")
+        pass  # handle errors gracefully
+
+def broadcast(game: Match):
+    payload = state(game)
+    loop = None
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        pass
+    for ws in list(clients.get(game.id, [])):
+        if loop and loop.is_running():
+            loop.call_soon_threadsafe(asyncio.create_task, _send(ws, payload))
+
+@app.websocket("/ws/{gid}/{pid}")
+async def ws_endpoint(gid: str, pid: str, ws: WebSocket):
+    await ws.accept()
+    
+    # Verifikasi ID pemain dan game
+    with Session(engine) as sess:
+        g = sess.get(Match, gid)
+        if not g:
+            log.error(f"Game ID {gid} not found.")
+            await ws.close()
+            return
+        
+        if pid not in {g.p1_id, g.p2_id}:
+            log.error(f"Player ID {pid} is not valid for this game.")
+            await ws.close()
+            return
+
+        # Kirim status game ke pemain
+        await ws.send_json(state(g))
+
+    try:
+        while True:
+            # Tunggu pesan dari klien
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        log.info(f"Connection to game {gid} player {pid} closed.")
+        clients[gid].discard(ws)
+    finally:
+        await ws.close()
