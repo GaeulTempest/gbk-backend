@@ -118,6 +118,25 @@ def join_game(game_id: str, request: JoinGameRequest):
             "player_id": game.p2_id,
             "role": "B"
         }
+        
+@app.get("/state/{game_id}")
+def get_game_state(game_id: str):
+    with get_session() as session:
+        game = session.get(Match, game_id)
+        if not game:
+            raise HTTPException(status_code=404, detail="Game not found")
+        return {
+            "players": {
+                "A": {"id": game.p1_id, "name": game.p1_name, "ready": game.p1_ready},
+                "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} 
+                if game.p2_id else None,
+            },
+            "moves": {
+                "A": game.p1_move,
+                "B": game.p2_move
+            },
+            "is_active": game.is_active
+        }
 
 @app.post("/ready/{game_id}")
 def set_ready(game_id: str, player_id: str):
@@ -163,21 +182,29 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, player_id: str)
             await websocket.close()
             return
         
-        if player_id not in {game.p1_id, game.p2_id}:
+        if player_id not in [game.p1_id, game.p2_id]:
             await websocket.send_json({"error": "Unauthorized access"})
             await websocket.close()
             return
-    
+
     await manager.connect(game_id, websocket)
     
     try:
         while True:
-            await websocket.receive_text()
+            # Kirim update state saat ada perubahan
+            with get_session() as session:
+                game = session.get(Match, game_id)
+                if not game:
+                    break
+                state = get_game_state(game_id)
+                await manager.broadcast(game_id, state)
+            
+            await asyncio.sleep(1)  # Update state setiap 1 detik
+            
     except WebSocketDisconnect:
         manager.disconnect(game_id, websocket)
     finally:
         await websocket.close()
-
 # ——— Helpers ————————————————————————
 def game_state(game: Match) -> dict:
     return {
