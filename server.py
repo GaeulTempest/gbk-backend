@@ -13,7 +13,7 @@ log = logging.getLogger("srv")
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Sesuaikan dengan kebutuhan Anda
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=True,
@@ -177,13 +177,16 @@ def get_game_state(game_id: str):
 @app.websocket("/ws/{game_id}/{player_id}")
 async def websocket_endpoint(websocket: WebSocket, game_id: str, player_id: str):
     try:
+        log.info(f"New connection attempt: Game ID {game_id}, Player ID {player_id}")
         with get_session() as session:
             game = session.get(Match, game_id)
             if not game or not game.is_active:
+                log.info(f"Game not active or not found: {game_id}")
                 await websocket.close(code=1008)
                 return
 
             if player_id not in [game.p1_id, game.p2_id]:
+                log.info(f"Player {player_id} is not part of this game")
                 await websocket.close(code=1008)
                 return
 
