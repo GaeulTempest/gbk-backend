@@ -203,7 +203,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, player_id: str)
     finally:
         manager.disconnect(game_id, websocket)
 
-# ——— Helpers ————————————————————————
+# ——— Helpers ————————————————————————  
 def game_state(game: Match) -> dict:
     return {
         "players": {
