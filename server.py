@@ -57,34 +57,6 @@ class Match(SQLModel, table=True):
     p2_move: Optional[str] = None
     is_active: bool = True
 
-# ——— WebSocket Management ———————————
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: Dict[str, Set[WebSocket]] = {}
-
-    async def connect(self, game_id: str, websocket: WebSocket):
-        await websocket.accept()
-        if game_id not in self.active_connections:
-            self.active_connections[game_id] = set()
-        self.active_connections[game_id].add(websocket)
-
-    def disconnect(self, game_id: str, websocket: WebSocket):
-        if game_id in self.active_connections:
-            self.active_connections[game_id].discard(websocket)
-            if not self.active_connections[game_id]:
-                del self.active_connections[game_id]
-
-    async def broadcast(self, game_id: str, message: dict):
-        if game_id in self.active_connections:
-            for connection in self.active_connections[game_id].copy():
-                try:
-                    await connection.send_json(message)
-                except Exception as e:
-                    log.error(f"Broadcast error: {str(e)}")
-                    self.disconnect(game_id, connection)
-
-manager = ConnectionManager()
-
 # ——— API Endpoints ——————————————————
 class CreateGameRequest(BaseModel):
     player_name: str
@@ -140,22 +112,6 @@ def set_ready(game_id: str, player_id: str = Body(..., embed=True)):
         # Kembalikan status permainan terbaru untuk mengirim ke semua pemain
         return game_state(game)
 
-@app.post("/move/{game_id}")
-def submit_move(game_id: str, player_id: str = Body(..., embed=True), move: str = Body(..., embed=True)):
-    with get_session() as session:
-        game = session.get(Match, game_id)
-        if not game:
-            raise HTTPException(404, "Game not found")
-        
-        if player_id == game.p1_id:
-            game.p1_move = move
-        elif player_id == game.p2_id:
-            game.p2_move = move
-        else:
-            raise HTTPException(403, "Invalid player")
-        
-        return game_state(game)
-
 @app.get("/state/{game_id}")
 def get_game_state(game_id: str):
     with get_session() as session:
@@ -169,42 +125,8 @@ def get_game_state(game_id: str):
                 "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} 
                 if game.p2_id else None,
             },
-            "moves": {
-                "A": game.p1_move,
-                "B": game.p2_move
-            },
             "is_active": game.is_active
         }
-
-# ——— WebSocket Endpoint ——————————————
-@app.websocket("/ws/{game_id}/{player_id}")
-async def websocket_endpoint(websocket: WebSocket, game_id: str, player_id: str):
-    try:
-        with get_session() as session:
-            game = session.get(Match, game_id)
-            if not game or not game.is_active:
-                await websocket.close(code=1008)
-                return
-
-            if player_id not in [game.p1_id, game.p2_id]:
-                await websocket.close(code=1008)
-                return
-
-        await manager.connect(game_id, websocket)
-        
-        try:
-            while True:
-                await websocket.receive_text()
-                state = get_game_state(game_id)
-                await manager.broadcast(game_id, state)
-                
-        except WebSocketDisconnect:
-            manager.disconnect(game_id, websocket)
-            
-    except Exception as e:
-        log.error(f"WebSocket error: {str(e)}")
-    finally:
-        manager.disconnect(game_id, websocket)
 
 # ——— Helpers ————————————————————————
 def game_state(game: Match) -> dict:
@@ -214,6 +136,5 @@ def game_state(game: Match) -> dict:
             "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} 
             if game.p2_id else None,
         },
-        "moves": {"A": game.p1_move, "B": game.p2_move},
         "is_active": game.is_active
     }
