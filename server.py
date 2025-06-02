@@ -137,6 +137,7 @@ def set_ready(game_id: str, player_id: str = Body(..., embed=True)):
         else:
             raise HTTPException(403, "Invalid player")
         
+        # Kembalikan status permainan terbaru untuk mengirim ke semua pemain
         return game_state(game)
 
 @app.post("/move/{game_id}")
