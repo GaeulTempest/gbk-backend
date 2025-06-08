@@ -13,7 +13,7 @@ log = logging.getLogger("srv")
 
 app = FastAPI()
 
-# CORS Middleware
+# CORS Middleware to allow cross-origin requests from the client
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins, you can restrict this for production
@@ -21,14 +21,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database URL setup
+# Database URL setup (SQLite in this case)
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./rps.db")
 engine = create_engine(
     DATABASE_URL, 
     connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 )
 
-# WebSocket Connection Manager
+# ——— WebSocket Connection Manager ———————————
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, Set[WebSocket]] = {}
@@ -58,7 +58,7 @@ manager = ConnectionManager()
 
 # ——— Models —————————————————————————
 class Match(SQLModel, table=True):
-    id: str = Field(default_factory=lambda: str(random.randint(10000, 99999)), primary_key=True)  # 5-digit random number
+    id: str = Field(default_factory=lambda: str(random.randint(10000, 99999)), primary_key=True)  # 5-digit random game ID
     p1_id: str
     p1_name: str
     p1_ready: bool = False
@@ -87,17 +87,29 @@ def on_startup():
 
 # ——— API Endpoints ——————————————————
 
-# Set player as ready
+# Endpoint to create a new game
+@app.post("/create_game")
+def create_game(request: CreateGameRequest):
+    with get_session() as session:
+        game_id = str(random.randint(10000, 99999))  # A 5-digit random game ID
+        game = Match(id=game_id, p1_name=request.player_name)
+        session.add(game)
+        session.commit()
+        return {
+            "game_id": game.id,
+            "player_id": game.p1_id,
+            "role": "A"
+        }
+
+# Endpoint for players to mark themselves as ready
 @app.post("/ready/{game_id}")
 async def set_ready(game_id: str, player_id: str = Body(..., embed=True)):
     with get_session() as session:
-        # Retrieve the game from the database
         game = session.get(Match, game_id)
         if not game:
             log.error(f"Game {game_id} not found.")
             raise HTTPException(status_code=404, detail="Game not found")
         
-        # Check if the player exists in the game
         if player_id == game.p1_id:
             game.p1_ready = True
         elif player_id == game.p2_id:
@@ -105,11 +117,9 @@ async def set_ready(game_id: str, player_id: str = Body(..., embed=True)):
         else:
             raise HTTPException(status_code=403, detail="Player not part of the game")
         
-        # Update game state
         session.add(game)
         session.commit()
 
-        # Broadcast updated state to all connected players via WebSocket
         message = {
             "game_id": game.id,
             "players": {
@@ -117,14 +127,12 @@ async def set_ready(game_id: str, player_id: str = Body(..., embed=True)):
                 "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} if game.p2_id else None
             }
         }
-        # Broadcast to all WebSocket clients
         await manager.broadcast(game_id, message)
         return message
 
-# WebSocket Connection Endpoint
+# WebSocket connection for real-time communication
 @app.websocket("/ws/{game_id}/{player_id}")
 async def websocket_endpoint(websocket: WebSocket, game_id: str, player_id: str):
-    # Ensure that the WebSocket is connected only for valid game and player
     with get_session() as session:
         game = session.get(Match, game_id)
         if not game:
@@ -140,7 +148,7 @@ async def websocket_endpoint(websocket: WebSocket, game_id: str, player_id: str)
     try:
         while True:
             await websocket.receive_text()  # Keeps the connection alive
-            # Send the current game state to the connected client
+            # Send current game state to client
             with get_session() as session:
                 game = session.get(Match, game_id)
                 message = {
