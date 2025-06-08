@@ -1,11 +1,12 @@
 import os, uuid, logging, asyncio, random
-from typing import Optional, Dict, Set
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body
+from typing import Optional
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field, Session, create_engine
 from contextlib import contextmanager
 import requests
+import base64
 
 # ——— Configuration ——————————————————
 logging.basicConfig(level=logging.INFO)
@@ -84,15 +85,26 @@ def get_stun_turn_config():
         channel = "multiplayergbk"
 
         # URL to get STUN/TURN servers from Xirsys
-        url = "https://global.xirsys.net/_turn/"
+        url = f"https://global.xirsys.net/_turn/{channel}"
+
+        # Encode credentials to base64 for Authorization header
+        auth_value = base64.b64encode(f"{ident}:{secret}".encode("utf-8")).decode("utf-8")
+
         headers = {
-            "Authorization": f"Basic {ident}:{secret}"
+            "Authorization": f"Basic {auth_value}",
+            "Content-Type": "application/json"
         }
-        data = {"channel": channel}
-        response = requests.post(url, headers=headers, data=data)
+
+        # Data format required by Xirsys
+        data = {
+            "format": "urls"  # Xirsys requires this format for the TURN server list
+        }
+
+        # Menggunakan PUT untuk permintaan ke Xirsys
+        response = requests.put(url, headers=headers, json=data)
 
         if response.status_code == 200:
-            return response.json()
+            return response.json()  # Mengembalikan respons JSON dari Xirsys
         else:
             raise HTTPException(status_code=500, detail=f"Failed to fetch STUN/TURN servers: {response.text}")
     except requests.RequestException as e:
