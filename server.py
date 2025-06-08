@@ -46,7 +46,7 @@ def on_startup():
 
 # ——— Models —————————————————————————
 class Match(SQLModel, table=True):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    id: str = Field(default_factory=lambda: str(random.randint(10000, 99999)), primary_key=True)  # 5-digit random number
     p1_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     p1_name: str
     p1_ready: bool = False
@@ -62,10 +62,23 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, Set[WebSocket]] = {}
 
-    async def connect(self, game_id: str, websocket: WebSocket):
+    async def connect(self, game_id: str, player_id: str, websocket: WebSocket):
         await websocket.accept()
         if game_id not in self.active_connections:
             self.active_connections[game_id] = set()
+
+        # Validate if player_id matches with the game
+        game = self.get_game(game_id)
+        if not game:
+            log.error(f"Game {game_id} does not exist.")
+            await websocket.close(code=1008)  # Close with abnormal closure code
+            return
+
+        if player_id not in [game.p1_id, game.p2_id]:
+            log.error(f"Player {player_id} not part of the game {game_id}.")
+            await websocket.close(code=1008)  # Close with abnormal closure code
+            return
+
         self.active_connections[game_id].add(websocket)
 
     def disconnect(self, game_id: str, websocket: WebSocket):
@@ -83,6 +96,12 @@ class ConnectionManager:
                     log.error(f"Broadcast error: {str(e)}")
                     self.disconnect(game_id, connection)
 
+    def get_game(self, game_id: str) -> Optional[Match]:
+        """Retrieve game information from the database."""
+        with get_session() as session:
+            game = session.get(Match, game_id)
+            return game
+
 manager = ConnectionManager()
 
 # ——— API Endpoints ——————————————————
@@ -92,7 +111,8 @@ class CreateGameRequest(BaseModel):
 @app.post("/create_game")
 def create_game(request: CreateGameRequest):
     with get_session() as session:
-        game = Match(p1_name=request.player_name)
+        game_id = str(random.randint(10000, 99999))  # 5-digit random number
+        game = Match(id=game_id, p1_name=request.player_name)
         session.add(game)
         session.commit()
         return {
@@ -143,3 +163,23 @@ def get_game_state(game_id: str):
             },
             "is_active": game.is_active
         }
+
+# ——— WebSocket Endpoint ——————————————
+@app.websocket("/ws/{game_id}/{player_id}")
+async def websocket_endpoint(websocket: WebSocket, game_id: str, player_id: str):
+    try:
+        await manager.connect(game_id, player_id, websocket)
+        log.info(f"Player {player_id} connected to game {game_id}")
+
+        try:
+            while True:
+                await websocket.receive_text()
+                state = get_game_state(game_id)
+                await manager.broadcast(game_id, state)
+                
+        except WebSocketDisconnect:
+            manager.disconnect(game_id, websocket)
+            log.info(f"Player {player_id} disconnected from game {game_id}")
+            
+    except Exception as e:
+        log.error(f"WebSocket error for game {game_id}, player {player_id}: {str(e)}")
