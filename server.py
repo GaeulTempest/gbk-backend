@@ -1,12 +1,10 @@
-import os, uuid, logging, asyncio, random
-from typing import Optional
-from fastapi import FastAPI, HTTPException
+import os, uuid, logging, asyncio
+from typing import Optional, Dict, Set
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field, Session, create_engine
 from contextlib import contextmanager
-import requests
-import base64
 
 # ——— Configuration ——————————————————
 logging.basicConfig(level=logging.INFO)
@@ -48,7 +46,7 @@ def on_startup():
 
 # ——— Models —————————————————————————
 class Match(SQLModel, table=True):
-    id: str = Field(default_factory=lambda: str(random.randint(10000, 99999)), primary_key=True)
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     p1_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     p1_name: str
     p1_ready: bool = False
@@ -59,6 +57,34 @@ class Match(SQLModel, table=True):
     p2_move: Optional[str] = None
     is_active: bool = True
 
+# ——— WebSocket Management ———————————
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, Set[WebSocket]] = {}
+
+    async def connect(self, game_id: str, websocket: WebSocket):
+        await websocket.accept()
+        if game_id not in self.active_connections:
+            self.active_connections[game_id] = set()
+        self.active_connections[game_id].add(websocket)
+
+    def disconnect(self, game_id: str, websocket: WebSocket):
+        if game_id in self.active_connections:
+            self.active_connections[game_id].discard(websocket)
+            if not self.active_connections[game_id]:
+                del self.active_connections[game_id]
+
+    async def broadcast(self, game_id: str, message: dict):
+        if game_id in self.active_connections:
+            for connection in self.active_connections[game_id].copy():
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    log.error(f"Broadcast error: {str(e)}")
+                    self.disconnect(game_id, connection)
+
+manager = ConnectionManager()
+
 # ——— API Endpoints ——————————————————
 class CreateGameRequest(BaseModel):
     player_name: str
@@ -66,61 +92,52 @@ class CreateGameRequest(BaseModel):
 @app.post("/create_game")
 def create_game(request: CreateGameRequest):
     with get_session() as session:
-        game_id = str(random.randint(10000, 99999))
-        game = Match(id=game_id, p1_name=request.player_name)
+        game = Match(p1_name=request.player_name)
         session.add(game)
+        session.commit()
         return {
             "game_id": game.id,
             "player_id": game.p1_id,
             "role": "A"
         }
 
-# ——— STUN/TURN Configuration Endpoint ——————————————————
-@app.get("/stun_turn_config")
-def get_stun_turn_config():
-    try:
-        # Xirsys API credentials
-        ident = "wawanshot"
-        secret = "6ebc02ec-4257-11f0-9543-aa614b70fb40"
-        channel = "multiplayergbk"
+class JoinGameRequest(BaseModel):
+    player_name: str
 
-        # URL to get STUN/TURN servers from Xirsys
-        url = f"https://global.xirsys.net/_turn/{channel}"
-
-        # Encode credentials to base64 for Authorization header
-        auth_value = base64.b64encode(f"{ident}:{secret}".encode("utf-8")).decode("utf-8")
-
-        headers = {
-            "Authorization": f"Basic {auth_value}",
-            "Content-Type": "application/json"
+@app.post("/join/{game_id}")
+def join_game(game_id: str, request: JoinGameRequest):
+    with get_session() as session:
+        game = session.get(Match, game_id)
+        if not game:
+            log.error(f"Game with ID {game_id} not found in the database.")
+            raise HTTPException(404, "Game not found")
+        
+        if game.p2_id:
+            raise HTTPException(400, "Game is full")
+        
+        game.p2_id = str(uuid.uuid4())
+        game.p2_name = request.player_name
+        session.add(game)
+        session.commit()
+        
+        return {
+            "game_id": game.id,
+            "player_id": game.p2_id,
+            "role": "B"
         }
 
-        # Data format required by Xirsys
-        data = {
-            "format": "urls"  # Xirsys requires this format for the TURN server list
+@app.get("/state/{game_id}")
+def get_game_state(game_id: str):
+    with get_session() as session:
+        game = session.get(Match, game_id)
+        if not game:
+            raise HTTPException(404, "Game not found")
+        
+        return {
+            "players": {
+                "A": {"id": game.p1_id, "name": game.p1_name, "ready": game.p1_ready},
+                "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} 
+                if game.p2_id else None,
+            },
+            "is_active": game.is_active
         }
-
-        # Menggunakan PUT untuk permintaan ke Xirsys
-        response = requests.put(url, headers=headers, json=data)
-
-        if response.status_code == 200:
-            return response.json()  # Mengembalikan respons JSON dari Xirsys
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to fetch STUN/TURN servers: {response.text}")
-    except requests.RequestException as e:
-        log.error(f"Error when accessing STUN/TURN API: {str(e)}")
-        raise HTTPException(status_code=500, detail="Error when accessing STUN/TURN API.")
-    except Exception as e:
-        log.error(f"Unexpected error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Helper Functions for Game State
-def game_state(game: Match) -> dict:
-    return {
-        "players": {
-            "A": {"id": game.p1_id, "name": game.p1_name, "ready": game.p1_ready},
-            "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} 
-            if game.p2_id else None,
-        },
-        "is_active": game.is_active
-    }
