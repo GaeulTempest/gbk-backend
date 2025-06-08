@@ -5,13 +5,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field, Session, create_engine
 from contextlib import contextmanager
-import asyncio  # Ensure asyncio is imported
+import asyncio
 
 # ——— Configuration ——————————————————
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("srv")
 
 app = FastAPI()
+
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all origins, you can restrict this for production
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Database URL setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./rps.db")
@@ -109,6 +117,40 @@ async def set_ready(game_id: str, player_id: str = Body(..., embed=True)):
                 "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} if game.p2_id else None
             }
         }
-        # Now, `await` works because this is inside an async function
+        # Broadcast to all WebSocket clients
         await manager.broadcast(game_id, message)
         return message
+
+# WebSocket Connection Endpoint
+@app.websocket("/ws/{game_id}/{player_id}")
+async def websocket_endpoint(websocket: WebSocket, game_id: str, player_id: str):
+    # Ensure that the WebSocket is connected only for valid game and player
+    with get_session() as session:
+        game = session.get(Match, game_id)
+        if not game:
+            await websocket.close(code=1008)
+            raise HTTPException(status_code=404, detail="Game not found")
+
+        if player_id not in [game.p1_id, game.p2_id]:
+            await websocket.close(code=1008)
+            raise HTTPException(status_code=403, detail="Player not part of the game")
+
+    await manager.connect(game_id, websocket)
+    
+    try:
+        while True:
+            await websocket.receive_text()  # Keeps the connection alive
+            # Send the current game state to the connected client
+            with get_session() as session:
+                game = session.get(Match, game_id)
+                message = {
+                    "game_id": game.id,
+                    "players": {
+                        "A": {"id": game.p1_id, "name": game.p1_name, "ready": game.p1_ready},
+                        "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} if game.p2_id else None
+                    }
+                }
+                await websocket.send_json(message)
+    except WebSocketDisconnect:
+        manager.disconnect(game_id, websocket)
+        log.info(f"Player {player_id} disconnected from game {game_id}")
