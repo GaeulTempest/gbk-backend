@@ -95,75 +95,88 @@ class CreateGameRequest(BaseModel):
 # Endpoint to create a new game
 @app.post("/create_game")
 def create_game(request: CreateGameRequest):
-    with get_session() as session:
-        game_id = str(random.randint(10000, 99999))  # A 5-digit random game ID
-        game = Match(id=game_id, p1_name=request.player_name)
-        session.add(game)
-        session.commit()
-        return {
-            "game_id": game.id,
-            "player_id": game.p1_id,
-            "role": "A"
-        }
+    try:
+        with get_session() as session:
+            game_id = str(random.randint(10000, 99999))  # A 5-digit random game ID
+            game = Match(id=game_id, p1_name=request.player_name)
+            session.add(game)
+            session.commit()
+            log.info(f"Game created with ID: {game_id}")
+            return {
+                "game_id": game.id,
+                "player_id": game.p1_id,
+                "role": "A"
+            }
+    except Exception as e:
+        log.error(f"Error creating game: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error while creating game")
 
 # Endpoint for players to mark themselves as ready
 @app.post("/ready/{game_id}")
 async def set_ready(game_id: str, player_id: str = Body(..., embed=True)):
-    with get_session() as session:
-        game = session.get(Match, game_id)
-        if not game:
-            log.error(f"Game {game_id} not found.")
-            raise HTTPException(status_code=404, detail="Game not found")
-        
-        if player_id == game.p1_id:
-            game.p1_ready = True
-        elif player_id == game.p2_id:
-            game.p2_ready = True
-        else:
-            raise HTTPException(status_code=403, detail="Player not part of the game")
-        
-        session.add(game)
-        session.commit()
+    try:
+        with get_session() as session:
+            game = session.get(Match, game_id)
+            if not game:
+                raise HTTPException(status_code=404, detail="Game not found")
+            
+            if player_id == game.p1_id:
+                game.p1_ready = True
+            elif player_id == game.p2_id:
+                game.p2_ready = True
+            else:
+                raise HTTPException(status_code=403, detail="Player not part of the game")
+            
+            session.add(game)
+            session.commit()
 
-        message = {
-            "game_id": game.id,
-            "players": {
-                "A": {"id": game.p1_id, "name": game.p1_name, "ready": game.p1_ready},
-                "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} if game.p2_id else None
+            message = {
+                "game_id": game.id,
+                "players": {
+                    "A": {"id": game.p1_id, "name": game.p1_name, "ready": game.p1_ready},
+                    "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} if game.p2_id else None
+                }
             }
-        }
-        await manager.broadcast(game_id, message)
-        return message
+            await manager.broadcast(game_id, message)
+            return message
+    except Exception as e:
+        log.error(f"Error marking player as ready for game {game_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error while marking ready")
 
 # WebSocket connection for real-time communication
 @app.websocket("/ws/{game_id}/{player_id}")
 async def websocket_endpoint(websocket: WebSocket, game_id: str, player_id: str):
-    with get_session() as session:
-        game = session.get(Match, game_id)
-        if not game:
-            await websocket.close(code=1008)
-            raise HTTPException(status_code=404, detail="Game not found")
-
-        if player_id not in [game.p1_id, game.p2_id]:
-            await websocket.close(code=1008)
-            raise HTTPException(status_code=403, detail="Player not part of the game")
-
-    await manager.connect(game_id, websocket)
-    
     try:
-        while True:
-            await websocket.receive_text()  # Keeps the connection alive
-            # Send current game state to client
-            with get_session() as session:
-                game = session.get(Match, game_id)
-                message = {
-                    "game_id": game.id,
-                    "players": {
-                        "A": {"id": game.p1_id, "name": game.p1_name, "ready": game.p1_ready},
-                        "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} if game.p2_id else None
+        with get_session() as session:
+            game = session.get(Match, game_id)
+            if not game:
+                log.error(f"Game {game_id} not found.")
+                await websocket.close(code=1008)
+                raise HTTPException(status_code=404, detail="Game not found")
+
+            if player_id not in [game.p1_id, game.p2_id]:
+                log.error(f"Player {player_id} is not part of game {game_id}.")
+                await websocket.close(code=1008)
+                raise HTTPException(status_code=403, detail="Player not part of the game")
+
+        await manager.connect(game_id, websocket)
+        
+        try:
+            while True:
+                await websocket.receive_text()  # Keeps the connection alive
+                with get_session() as session:
+                    game = session.get(Match, game_id)
+                    message = {
+                        "game_id": game.id,
+                        "players": {
+                            "A": {"id": game.p1_id, "name": game.p1_name, "ready": game.p1_ready},
+                            "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} if game.p2_id else None
+                        }
                     }
-                }
-                await websocket.send_json(message)
-    except WebSocketDisconnect:
-        manager.disconnect(game_id, websocket)
-        log.info(f"Player {player_id} disconnected from game {game_id}")
+                    await websocket.send_json(message)
+        except WebSocketDisconnect:
+            manager.disconnect(game_id, websocket)
+            log.info(f"Player {player_id} disconnected from game {game_id}")
+    except Exception as e:
+        log.error(f"WebSocket error for game {game_id} and player {player_id}: {str(e)}")
+        await websocket.close(code=1008)
