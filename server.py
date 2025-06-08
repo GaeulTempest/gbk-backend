@@ -85,6 +85,11 @@ def get_session():
 def on_startup():
     SQLModel.metadata.create_all(engine)
 
+# ——— CreateGameRequest Model —————————————————
+# This model will be used to validate incoming data for creating a new game
+class CreateGameRequest(BaseModel):
+    player_name: str
+
 # ——— API Endpoints ——————————————————
 
 # Endpoint to create a new game
