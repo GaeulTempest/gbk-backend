@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import SQLModel, Field, Session, create_engine
 from contextlib import contextmanager
+import asyncio  # Ensure asyncio is imported
 
 # ——— Configuration ——————————————————
 logging.basicConfig(level=logging.INFO)
@@ -80,7 +81,7 @@ def on_startup():
 
 # Set player as ready
 @app.post("/ready/{game_id}")
-def set_ready(game_id: str, player_id: str = Body(..., embed=True)):
+async def set_ready(game_id: str, player_id: str = Body(..., embed=True)):
     with get_session() as session:
         # Retrieve the game from the database
         game = session.get(Match, game_id)
@@ -108,5 +109,6 @@ def set_ready(game_id: str, player_id: str = Body(..., embed=True)):
                 "B": {"id": game.p2_id, "name": game.p2_name, "ready": game.p2_ready} if game.p2_id else None
             }
         }
+        # Now, `await` works because this is inside an async function
         await manager.broadcast(game_id, message)
         return message
