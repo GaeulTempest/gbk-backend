@@ -94,8 +94,12 @@ def get_stun_turn_config():
         if response.status_code == 200:
             return response.json()
         else:
-            raise HTTPException(status_code=500, detail="Failed to fetch STUN/TURN servers.")
+            raise HTTPException(status_code=500, detail=f"Failed to fetch STUN/TURN servers: {response.text}")
+    except requests.RequestException as e:
+        log.error(f"Error when accessing STUN/TURN API: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error when accessing STUN/TURN API.")
     except Exception as e:
+        log.error(f"Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Helper Functions for Game State
