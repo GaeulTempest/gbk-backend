@@ -109,7 +109,7 @@ def join_game(game_id: str, request: JoinGameRequest):
     with get_session() as session:
         game = session.get(Match, game_id)
         if not game:
-            log.error(f"Game with ID {game_id} not found in the database.")
+            log.error(f"Game with ID {game_id} not found.")
             raise HTTPException(404, "Game not found")
         
         if game.p2_id:
