@@ -85,37 +85,48 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# ——— API Endpoints ——————————————————@app.post("/join/{game_id}")
+# ——— API Endpoints ——————————————————
+class CreateGameRequest(BaseModel):
+    player_name: str
+
+@app.post("/create_game")
+def create_game(request: CreateGameRequest):
+    with get_session() as session:
+        game = Match(p1_name=request.player_name)
+        session.add(game)
+        session.commit()
+        return {
+            "game_id": game.id,
+            "player_id": game.p1_id,
+            "role": "A"
+        }
+
+class JoinGameRequest(BaseModel):
+    player_name: str
+
+@app.post("/join/{game_id}")
 def join_game(game_id: str, request: JoinGameRequest):
     with get_session() as session:
         game = session.get(Match, game_id)
         
-        # Pastikan game ID yang diminta valid
         if not game:
             log.error(f"Game with ID {game_id} not found in the database.")
             raise HTTPException(404, "Game not found")
-
-        # Jika game sudah penuh (Player 2 sudah ada), kirimkan error
+        
         if game.p2_id:
             raise HTTPException(400, "Game is full")
-
-        # Menambahkan player 2
+        
         game.p2_id = str(uuid.uuid4())
         game.p2_name = request.player_name
         session.add(game)
         session.commit()
-
-        # Return data yang valid setelah pemain bergabung
+        
+        log.info(f"Player {request.player_name} successfully joined the game.")
         return {
             "game_id": game.id,
             "player_id": game.p2_id,
             "role": "B"
         }
-
-class CreateGameRequest(BaseModel):
-    player_name: str
-
-
 
 @app.get("/state/{game_id}")
 def get_game_state(game_id: str):
